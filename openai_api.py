@@ -119,11 +119,13 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         request_dict = request.model_dump()
         debug_log("开始转换请求格式: OpenAI -> Z.AI")
         
+        # 初始转换
         transformed = await transformer.transform_request_in(request_dict)
 
         # 调用上游API
         async def stream_response():
             """流式响应生成器（包含重试机制和指数退避）"""
+            nonlocal transformed  # 声明使用外部作用域的transformed变量
             retry_count = 0
             last_error = None
 
@@ -166,6 +168,15 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                             if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
                                 retry_count += 1
                                 last_error = f"{response.status_code}: {error_msg}"
+                                
+                                # 如果是401认证失败或400错误，尝试切换token
+                                if response.status_code in [400, 401]:
+                                    debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
+                                    new_token = transformer.switch_token()
+                                    # 使用新token重新生成请求
+                                    transformed = await transformer.transform_request_in(request_dict)
+                                    debug_log(f"[OK] 已切换token并重新生成请求")
+                                
                                 continue
                             
                             error_response = {

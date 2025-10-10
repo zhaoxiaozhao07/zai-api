@@ -8,6 +8,9 @@ API_ENDPOINT=https://chat.z.ai/api/chat/completions
 AUTH_TOKEN=sk-123456
 
 # Z.AI Token（必须配置，用于访问Z.AI API）
+# 支持多个token，用逗号分隔，例如: token1,token2,token3
+# 也可以在当前目录创建tokens.txt文件，一行一个token
+# 系统会自动合并去重，并在请求失败时切换token
 ZAI_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijc0MzIzNzQ3LTVhMTAtNDQ3My05ZjhmLTk5YjI2OWUwZDA0ZCIsImVtYWlsIjoib3FjZ3lrNWFodUBkdWNrbWFpbC5zYnMifQ.SJSZxgX4saVleREBpWdV1JIRxd_tJ_6cv3EflJFy8KXTSBSzYXmfVz9RZF5cF78aI3TY54eAONEjYuGbmYNYZQ
 
 # Z.AI 签名密钥（用于API请求签名，默认值：junjie）

@@ -3,8 +3,12 @@ FastAPI application configuration module
 """
 
 import os
+from dotenv import load_dotenv
 from typing import Optional
 from pydantic_settings import BaseSettings
+
+# 加载.env文件
+load_dotenv()
 
 
 class Settings(BaseSettings):

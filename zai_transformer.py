@@ -17,6 +17,7 @@ from browserforge.headers import HeaderGenerator
 from config import settings, MODEL_MAPPING
 from helpers import debug_log
 from signature import SignatureGenerator, decode_jwt_payload
+from token_pool import get_token_pool
 
 
 # 全局 HeaderGenerator 实例（单例模式）
@@ -153,13 +154,17 @@ class ZAITransformer:
         self.signature_generator = SignatureGenerator()
 
     def get_token(self) -> str:
-        """获取Z.AI认证令牌（从配置读取）"""
-        token = settings.ZAI_TOKEN
-        if not token:
-            debug_log("❌ 未配置ZAI_TOKEN")
-            raise Exception("未配置ZAI_TOKEN，请在.env文件中设置")
+        """获取Z.AI认证令牌（从token池获取）"""
+        token_pool = get_token_pool()
+        token = token_pool.get_token()
         
-        debug_log(f"使用配置的令牌: {token[:20]}...")
+        debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token[:20]}...")
+        return token
+    
+    def switch_token(self) -> str:
+        """切换到下一个token（请求失败时调用）"""
+        token_pool = get_token_pool()
+        token = token_pool.switch_to_next()
         return token
     
     def _process_messages(self, messages: list) -> list:
