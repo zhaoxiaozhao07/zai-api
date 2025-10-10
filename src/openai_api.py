@@ -245,11 +245,15 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     client = await get_http_client()
                     
                     # 发起流式请求
+                    # 注意：移除Accept-Encoding以禁用压缩，避免流式响应解码问题
+                    headers = transformed["config"]["headers"].copy()
+                    headers.pop("Accept-Encoding", None)
+                    
                     async with client.stream(
                         "POST",
                         transformed["config"]["url"],
                         json=transformed["body"],
-                        headers=transformed["config"]["headers"],
+                        headers=headers,
                     ) as response:
                         # 检查响应状态码
                         if response.status_code != 200:
@@ -298,15 +302,19 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         has_thinking = False
                         first_thinking_chunk = True
                         accumulated_content = ""  # 累积内容用于工具调用检测
+                        yielded_chunks_count = 0  # 统计yield的chunk数量
 
-                        # 处理SSE流 - 使用 aiter_lines() 自动处理编码和行分割
+                        # 处理SSE流 - 使用 aiter_lines() 自动处理行分割
                         buffer = ""
                         line_count = 0
+                        debug_log("开始迭代SSE流...")
 
                         async for line in response.aiter_lines():
                             line_count += 1
                             if not line:
                                 continue
+                            
+                            debug_log(f"[RAW-LINE-{line_count}] 长度: {len(line)}, 开头: {repr(line[:50]) if len(line) > 0 else 'EMPTY'}")
 
                             # 累积到buffer处理完整的数据行
                             buffer += line + "\n"
@@ -319,8 +327,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
 
                                 if current_line.startswith("data:"):
                                     chunk_str = current_line[5:].strip()
+                                    debug_log(f"[SSE-RAW] 收到数据行，长度: {len(chunk_str)}, 预览: {chunk_str[:100] if chunk_str else 'empty'}")
                                     if not chunk_str or chunk_str == "[DONE]":
                                         if chunk_str == "[DONE]":
+                                            debug_log("[SSE-RAW] 收到 [DONE] 信号")
                                             # 流结束，检查是否有工具调用
                                             if toolify_detector:
                                                 debug_log(f"[TOOLIFY] 流结束，检测器状态: {toolify_detector.state}, 缓冲区长度: {len(toolify_detector.content_buffer)}")
@@ -345,17 +355,21 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
 
                                     try:
                                         chunk_data = json.loads(chunk_str)
+                                        debug_log(f"[SSE-JSON] 解析成功，type: {chunk_data.get('type')}")
 
                                         if chunk_data.get("type") == "chat:completion":
                                             data = chunk_data.get("data", {})
                                             phase = data.get("phase")
+                                            debug_log(f"[SSE] 处理块: type={chunk_data.get('type')}, phase={phase}, has_delta={bool(data.get('delta_content'))}, has_usage={bool(data.get('usage'))}")
 
                                             # 处理思考内容
                                             if phase == "thinking":
                                                 delta_content = data.get("delta_content", "")
+                                                debug_log(f"[SSE-THINKING] delta_content长度: {len(delta_content) if delta_content else 0}, 内容: {repr(delta_content[:50]) if delta_content else 'EMPTY'}")
                                                 
                                                 # 工具调用检测
                                                 if toolify_detector and delta_content:
+                                                    debug_log(f"[SSE-THINKING] 调用工具检测器")
                                                     is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
                                                     
                                                     if is_tool_detected:
@@ -451,15 +465,19 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         "object": "chat.completion.chunk",
                                                         "system_fingerprint": "fp_zai_001",
                                                     }
+                                                    yielded_chunks_count += 1
+                                                    debug_log(f"[YIELD] thinking chunk #{yielded_chunks_count}, content长度: {len(formatted_content)}")
                                                     yield f"data: {json.dumps(thinking_chunk)}\n\n"
 
                                             # 处理答案内容
                                             elif phase == "answer":
                                                 edit_content = data.get("edit_content", "")
                                                 delta_content = data.get("delta_content", "")
+                                                debug_log(f"[SSE-ANSWER] delta_content长度: {len(delta_content) if delta_content else 0}, edit_content长度: {len(edit_content) if edit_content else 0}")
                                                 
                                                 # 工具调用检测
                                                 if toolify_detector and delta_content:
+                                                    debug_log(f"[SSE-ANSWER] 调用工具检测器")
                                                     is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
                                                     
                                                     if is_tool_detected:
@@ -595,6 +613,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         "object": "chat.completion.chunk",
                                                         "system_fingerprint": "fp_zai_001",
                                                     }
+                                                    yielded_chunks_count += 1
+                                                    debug_log(f"[YIELD] answer chunk #{yielded_chunks_count}, content长度: {len(delta_content)}")
                                                     yield f"data: {json.dumps(content_chunk)}\n\n"
 
                                             # 处理完成
@@ -634,6 +654,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                 }
                                                 yield f"data: {json.dumps(finish_chunk)}\n\n"
                                                 yield "data: [DONE]\n\n"
+                                                return
 
                                     except json.JSONDecodeError as e:
                                         debug_log(
@@ -645,7 +666,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     except Exception as e:
                                         debug_log("处理chunk错误", error=str(e))
 
-                        debug_log("SSE 流处理完成", line_count=line_count)
+                        debug_log("SSE 流处理完成", line_count=line_count, yielded_chunks=yielded_chunks_count)
                         
                         # 流自然结束，检查是否有工具调用
                         if toolify_detector:
@@ -772,11 +793,15 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             client = await get_http_client()
             
             # 发起流式请求（上游始终返回SSE流）
+            # 注意：移除Accept-Encoding以禁用压缩，避免流式响应解码问题
+            headers = transformed["config"]["headers"].copy()
+            headers.pop("Accept-Encoding", None)
+            
             async with client.stream(
                 "POST",
                 transformed["config"]["url"],
                 json=transformed["body"],
-                headers=transformed["config"]["headers"],
+                headers=headers,
             ) as response:
                 # 检查响应状态码
                 if response.status_code != 200:
