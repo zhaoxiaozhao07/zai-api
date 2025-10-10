@@ -1,9 +1,7 @@
 services:
   zai-api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: openai-api-server
+    image: julienol/zai-api:latest
+    container_name: zai-api
     restart: unless-stopped
     ports:
       - "8080:8080"

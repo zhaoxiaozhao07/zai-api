@@ -1,0 +1,67 @@
+name: Build and Push Docker Image
+
+on:
+  # 触发条件：推送到 main 分支
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Docker 镜像标签'
+        required: false
+        default: 'latest'
+
+env:
+  REGISTRY: docker.io
+  IMAGE_NAME: julienol/zai-api
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+      
+    - name: 设置 Docker Buildx
+      uses: docker/setup-buildx-action@v3
+      
+    - name: 登录 Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+    
+    - name: 提取元数据
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+          type=raw,value=latest,enable={{is_default_branch}}
+          type=raw,value=${{ github.event.inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+    
+    - name: 构建并推送 Docker 镜像
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        # 支持多平台构建
+        platforms: linux/amd64,linux/arm64
+        # 使用 GitHub Actions 缓存加速构建
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
