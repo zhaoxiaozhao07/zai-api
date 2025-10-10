@@ -13,9 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY main.py .
 COPY src/ ./src/
 
-RUN mkdir -p /app/data && \
-    touch /app/data/tokens.txt
-
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

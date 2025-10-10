@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 from typing import Optional
 from pydantic_settings import BaseSettings
 
-# 加载.env文件
-load_dotenv()
+# 加载.env文件,覆盖电脑自身环境变量，哪怕为空也要加载
+load_dotenv(override=True)
 
 
 class Settings(BaseSettings):
@@ -48,8 +48,8 @@ class Settings(BaseSettings):
     ENABLE_TOOLIFY: bool = os.getenv("ENABLE_TOOLIFY", "true").lower() == "true"
     TOOLIFY_CUSTOM_PROMPT: Optional[str] = os.getenv("TOOLIFY_CUSTOM_PROMPT")
     
-    class Config:
-        env_file = ".env"
+    # class Config:
+    #     env_file = ".env"
 
 
 settings = Settings()

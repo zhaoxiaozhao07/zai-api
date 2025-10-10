@@ -35,6 +35,8 @@ SKIP_AUTH_TOKEN=false
 MAX_RETRIES=3
 
 # 代理配置（可选）
+# 如果需要使用代理，取消注释并设置代理地址
+# 如果不需要代理，保持注释状态或留空
 # HTTP_PROXY=http://127.0.0.1:7890
 # HTTPS_PROXY=http://127.0.0.1:7890
 

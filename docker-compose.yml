@@ -1,6 +1,10 @@
 services:
   zai-api:
-    image: julienol/zai-api:latest
+    # 临时使用本地构建，测试代理修复
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # image: julienol/zai-api:latest
     container_name: zai-api
     restart: unless-stopped
     ports:
@@ -9,7 +13,7 @@ services:
       - .env
     volumes:
       # 挂载 tokens.txt 文件（如果需要从文件读取 token）
-      - ./tokens.txt:/app/data/tokens.txt:ro
+      - ./tokens.txt:/app/tokens.txt:ro
     networks:
       - api-network
     healthcheck:

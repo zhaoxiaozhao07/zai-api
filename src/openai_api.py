@@ -55,17 +55,24 @@ async def get_http_client() -> httpx.AsyncClient:
                 write=10.0,    # 写入超时
                 pool=5.0       # 连接池超时
             )
-            
-            _http_client = httpx.AsyncClient(
-                timeout=timeout,
-                limits=limits,
-                proxy=proxy,
-                http2=True,  # 启用HTTP/2支持
-                follow_redirects=True
-            )
-            
             if proxy:
                 debug_log("使用代理创建HTTP客户端", proxy=proxy)
+                _http_client = httpx.AsyncClient(
+                    timeout=timeout,
+                    limits=limits,
+                    proxy=proxy,
+                    http2=True,  # 启用HTTP/2支持
+                    follow_redirects=True
+                )
+            else:
+                debug_log("未使用代理创建HTTP客户端")
+                _http_client = httpx.AsyncClient(
+                    timeout=timeout,
+                    limits=limits,
+                    http2=True,  # 启用HTTP/2支持
+                    follow_redirects=True
+                )
+
         
         return _http_client
 
