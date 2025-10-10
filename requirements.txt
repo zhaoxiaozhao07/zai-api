@@ -4,8 +4,10 @@ uvicorn[standard]>=0.24.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 
-# HTTP 客户端
-httpx[http2]>=0.25.0
+# HTTP 客户端（包含 brotli 和 zstandard 支持以处理压缩响应）
+httpx[http2,brotli,zstd]>=0.25.0
+brotli>=1.0.9
+zstandard>=0.21.0
 
 # JWT 处理（使用jose替代PyJWT，更专业的JWT处理）
 python-jose[cryptography]>=3.3.0

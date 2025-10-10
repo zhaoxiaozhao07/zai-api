@@ -245,7 +245,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     client = await get_http_client()
                     
                     # 发起流式请求
-                    # 注意：移除Accept-Encoding以禁用压缩，避免流式响应解码问题
+                    # 注意：移除手动设置的Accept-Encoding，让httpx自动管理压缩/解压
+                    # 这样httpx会根据已安装的解压库（brotli, zstandard）自动处理
                     headers = transformed["config"]["headers"].copy()
                     headers.pop("Accept-Encoding", None)
                     
@@ -793,7 +794,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             client = await get_http_client()
             
             # 发起流式请求（上游始终返回SSE流）
-            # 注意：移除Accept-Encoding以禁用压缩，避免流式响应解码问题
+            # 注意：移除手动设置的Accept-Encoding，让httpx自动管理压缩/解压
             headers = transformed["config"]["headers"].copy()
             headers.pop("Accept-Encoding", None)
             
