@@ -144,7 +144,7 @@ async def list_models():
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, authorization: str = Header(...)):
-    """Handle chat completion requests with ZAI transformer - 优化异步处理"""
+    """Handle chat completion requests with ZAI transformer - 支持流式和非流式"""
     role = request.messages[0].role if request.messages else "unknown"
     debug_log(
         "收到客户端请求",
@@ -169,6 +169,11 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         
         # 初始转换
         transformed = await transformer.transform_request_in(request_dict)
+        
+        # 根据stream参数决定返回流式或非流式响应
+        if not request.stream:
+            debug_log("使用非流式模式")
+            return await handle_non_stream_request(request, transformed)
 
         # 调用上游API
         async def stream_response():
@@ -500,3 +505,235 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
     except Exception as e:
         debug_log("处理请求时发生错误", error=str(e))
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+def create_openai_response(chat_id: str, model: str, content: str, reasoning_content: str = "", usage: dict = None) -> dict:
+    """创建OpenAI格式的响应对象"""
+    response = {
+        "id": chat_id,
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": content
+                },
+                "finish_reason": "stop"
+            }
+        ],
+        "usage": usage or {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0
+        }
+    }
+    
+    # 如果有推理内容，添加到message中
+    if reasoning_content:
+        response["choices"][0]["message"]["reasoning_content"] = reasoning_content
+    
+    return response
+
+
+async def handle_non_stream_request(request: OpenAIRequest, transformed: dict) -> dict:
+    """
+    处理非流式请求
+    
+    说明：上游始终以 SSE 形式返回（transform_request_in 固定 stream=True），
+    因此这里需要聚合 aiter_lines() 的 data: 块，提取 usage、思考内容与答案内容，
+    并最终产出一次性 OpenAI 格式响应。
+    """
+    final_content = ""
+    reasoning_content = ""
+    usage_info = {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+    }
+    
+    retry_count = 0
+    last_error = None
+    last_status_code = None
+    
+    while retry_count <= settings.MAX_RETRIES:
+        try:
+            # 智能退避重试策略
+            if retry_count > 0:
+                delay = calculate_backoff_delay(
+                    retry_count=retry_count,
+                    status_code=last_status_code,
+                    base_delay=3.0,
+                    max_delay=40.0
+                )
+                debug_log(
+                    f"[RETRY] 非流式请求重试 ({retry_count}/{settings.MAX_RETRIES})",
+                    retry_count=retry_count,
+                    delay=f"{delay:.2f}s"
+                )
+                await asyncio.sleep(delay)
+            
+            # 获取全局HTTP客户端
+            client = await get_http_client()
+            
+            # 发起流式请求（上游始终返回SSE流）
+            async with client.stream(
+                "POST",
+                transformed["config"]["url"],
+                json=transformed["body"],
+                headers=transformed["config"]["headers"],
+            ) as response:
+                # 检查响应状态码
+                if response.status_code != 200:
+                    error_text = await response.aread()
+                    error_msg = error_text.decode('utf-8', errors='ignore')
+                    debug_log(
+                        "上游返回错误",
+                        status_code=response.status_code,
+                        error_detail=error_msg[:200]
+                    )
+                    
+                    # 可重试的错误
+                    retryable_codes = [400, 401, 429, 502, 503, 504]
+                    if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
+                        last_status_code = response.status_code
+                        last_error = f"{response.status_code}: {error_msg}"
+                        retry_count += 1
+                        
+                        # 如果是401认证失败或400错误，尝试切换token
+                        if response.status_code in [400, 401]:
+                            debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
+                            new_token = transformer.switch_token()
+                            # 使用新token重新生成请求
+                            request_dict = request.model_dump()
+                            transformed = await transformer.transform_request_in(request_dict)
+                            debug_log(f"[OK] 已切换token并重新生成请求")
+                        
+                        continue
+                    
+                    # 不可重试的错误，直接抛出
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=f"Upstream error: {error_msg[:500]}"
+                    )
+                
+                # 200 成功，聚合SSE流数据
+                debug_log("Z.AI 响应成功，开始聚合非流式数据", status="success")
+                
+                # 重置聚合变量
+                final_content = ""
+                reasoning_content = ""
+                
+                async for line in response.aiter_lines():
+                    if not line:
+                        continue
+                    
+                    line = line.strip()
+                    
+                    # 仅处理以 data: 开头的 SSE 行
+                    if not line.startswith("data:"):
+                        # 尝试解析为错误 JSON
+                        try:
+                            maybe_err = json.loads(line)
+                            if isinstance(maybe_err, dict) and (
+                                "error" in maybe_err or "code" in maybe_err or "message" in maybe_err
+                            ):
+                                msg = (
+                                    (maybe_err.get("error") or {}).get("message")
+                                    if isinstance(maybe_err.get("error"), dict)
+                                    else maybe_err.get("message")
+                                ) or "上游返回错误"
+                                raise HTTPException(status_code=500, detail=msg)
+                        except (json.JSONDecodeError, HTTPException):
+                            pass
+                        continue
+                    
+                    data_str = line[5:].strip()
+                    if not data_str or data_str in ("[DONE]", "DONE", "done"):
+                        continue
+                    
+                    # 解析 SSE 数据块
+                    try:
+                        chunk = json.loads(data_str)
+                    except json.JSONDecodeError:
+                        continue
+                    
+                    if chunk.get("type") != "chat:completion":
+                        continue
+                    
+                    data = chunk.get("data", {})
+                    phase = data.get("phase")
+                    delta_content = data.get("delta_content", "")
+                    edit_content = data.get("edit_content", "")
+                    
+                    # 记录用量（通常在最后块中出现）
+                    if data.get("usage"):
+                        try:
+                            usage_info = data["usage"]
+                        except Exception:
+                            pass
+                    
+                    # 思考阶段聚合（去除 <details><summary>... 包裹头）
+                    if phase == "thinking":
+                        if delta_content:
+                            if delta_content.startswith("<details"):
+                                cleaned = (
+                                    delta_content.split("</summary>\n>")[-1].strip()
+                                    if "</summary>\n>" in delta_content
+                                    else delta_content
+                                )
+                            else:
+                                cleaned = delta_content
+                            reasoning_content += cleaned
+                    
+                    # 答案阶段聚合
+                    elif phase == "answer":
+                        # 当 edit_content 同时包含思考结束标记与答案时，提取答案部分
+                        if edit_content and "</details>\n" in edit_content:
+                            content_after = edit_content.split("</details>\n")[-1]
+                            if content_after:
+                                final_content += content_after
+                        elif delta_content:
+                            final_content += delta_content
+                
+                # 清理并返回
+                final_content = (final_content or "").strip()
+                reasoning_content = (reasoning_content or "").strip()
+                
+                # 若没有聚合到答案，但有思考内容，则保底返回思考内容
+                if not final_content and reasoning_content:
+                    final_content = reasoning_content
+                
+                debug_log(
+                    "非流式响应聚合完成",
+                    content_length=len(final_content),
+                    reasoning_length=len(reasoning_content),
+                    usage=usage_info
+                )
+                
+                # 返回标准OpenAI格式响应
+                return create_openai_response(
+                    transformed["body"]["chat_id"],
+                    request.model,
+                    final_content,
+                    reasoning_content,
+                    usage_info
+                )
+        
+        except HTTPException:
+            raise
+        except Exception as e:
+            debug_log("非流式处理错误", error=str(e))
+            retry_count += 1
+            last_error = str(e)
+            
+            if retry_count > settings.MAX_RETRIES:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Non-stream processing failed after {settings.MAX_RETRIES} retries: {last_error}"
+                )
+    
+    # 不应该到达这里
+    raise HTTPException(status_code=500, detail="Unexpected error in non-stream processing")
