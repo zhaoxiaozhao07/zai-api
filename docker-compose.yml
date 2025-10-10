@@ -9,6 +9,9 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    environment:
+      # 禁用 Python 缓冲，确保流式响应实时输出
+      - PYTHONUNBUFFERED=1
     env_file:
       - .env
     volumes:
