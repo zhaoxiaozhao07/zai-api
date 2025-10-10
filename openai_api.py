@@ -4,6 +4,7 @@ OpenAI API endpoints - 优化版本
 
 import time
 import json
+import random
 import asyncio
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -77,6 +78,53 @@ async def close_http_client():
             debug_log("HTTP客户端已关闭")
 
 
+def calculate_backoff_delay(retry_count: int, status_code: int = None, base_delay: float = 3.0, max_delay: float = 30.0) -> float:
+    """
+    计算退避延迟时间（带随机抖动和针对不同错误的策略）
+    
+    Args:
+        retry_count: 当前重试次数（从1开始）
+        status_code: HTTP状态码，用于区分不同错误类型
+        base_delay: 基础延迟时间（秒）
+        max_delay: 最大延迟时间（秒）
+    
+    Returns:
+        计算后的延迟时间（秒）
+    """
+    # 基础指数退避：base_delay * 2^(retry_count-1)
+    exponential_delay = base_delay * (2 ** (retry_count - 1))
+    
+    # 针对不同错误类型调整延迟
+    if status_code == 429:  # Rate limit - 更长的退避时间
+        exponential_delay *= 2.0  # 双倍延迟
+        debug_log("[BACKOFF] 检测到429限流错误，使用更长退避时间")
+    elif status_code in [502, 503, 504]:  # 服务端错误 - 适中延迟
+        exponential_delay *= 1.5
+        debug_log("[BACKOFF] 检测到服务端错误，使用适中退避时间")
+    elif status_code in [400, 401]:  # 认证/请求错误 - 标准延迟
+        debug_log("[BACKOFF] 检测到认证/请求错误，使用标准退避时间")
+    
+    # 限制最大延迟
+    exponential_delay = min(exponential_delay, max_delay)
+    
+    # 添加随机抖动因子（±25%），避免多个请求同时重试造成雪崩
+    jitter = exponential_delay * 0.25  # 25%的抖动范围
+    jittered_delay = exponential_delay + random.uniform(-jitter, jitter)
+    
+    # 确保延迟不会小于基础延迟的一半
+    final_delay = max(jittered_delay, base_delay * 0.5)
+    
+    debug_log(
+        "[BACKOFF] 计算退避延迟",
+        retry_count=retry_count,
+        status_code=status_code,
+        exponential=f"{exponential_delay:.2f}s",
+        final=f"{final_delay:.2f}s"
+    )
+    
+    return final_delay
+
+
 @router.get("/v1/models")
 async def list_models():
     """List available models"""
@@ -124,22 +172,29 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
 
         # 调用上游API
         async def stream_response():
-            """流式响应生成器（包含重试机制和指数退避）"""
+            """流式响应生成器（包含重试机制和智能退避策略）"""
             nonlocal transformed  # 声明使用外部作用域的transformed变量
             retry_count = 0
             last_error = None
+            last_status_code = None  # 记录上次失败的状态码
 
             while retry_count <= settings.MAX_RETRIES:
                 try:
-                    # 指数退避重试策略
+                    # 智能退避重试策略（带随机抖动和错误类型区分）
                     if retry_count > 0:
-                        # 计算退避延迟：基础2秒 * 2^(retry_count-1)，最大30秒
-                        delay = min(2.0 * (2 ** (retry_count - 1)), 30.0)
+                        # 使用智能退避策略计算延迟
+                        delay = calculate_backoff_delay(
+                            retry_count=retry_count,
+                            status_code=last_status_code,
+                            base_delay=3.0,
+                            max_delay=40.0
+                        )
                         debug_log(
-                            f"重试请求 ({retry_count}/{settings.MAX_RETRIES})",
+                            f"[RETRY] 重试请求 ({retry_count}/{settings.MAX_RETRIES})",
                             retry_count=retry_count,
                             max_retries=settings.MAX_RETRIES,
-                            delay=delay
+                            delay=f"{delay:.2f}s",
+                            last_status=last_status_code
                         )
                         await asyncio.sleep(delay)
 
@@ -166,8 +221,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                             # 可重试的错误
                             retryable_codes = [400, 401, 429, 502, 503, 504]
                             if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
-                                retry_count += 1
+                                # 记录状态码和错误信息，用于智能退避策略
+                                last_status_code = response.status_code
                                 last_error = f"{response.status_code}: {error_msg}"
+                                retry_count += 1
                                 
                                 # 如果是401认证失败或400错误，尝试切换token
                                 if response.status_code in [400, 401]:
