@@ -10,7 +10,7 @@
 - **Z.AI 后端集成**：自动转换并调用 Z.AI API
 - **多模型支持**：支持 GLM-4.5、GLM-4.6、Thinking、Search、Air 等多个模型
 - **流式和非流式**：同时支持流式（SSE）和非流式响应模式
-- CC支持：支持通过Claude Code Router接入到CC中
+- Claude Code支持：支持通过Claude Code Router接入到CC中
 - Code插件支持：支持Cline、Roo Code、Kilo Code等第三方插件
 
 ### 工具调用（Function Calling）
@@ -33,13 +33,11 @@
 
 ## 快速开始
 
-### 1. 安装依赖
+### 方式一：Docker 部署（推荐）
 
-```bash
-pip install -r requirements.txt
-```
+使用 Docker Compose 快速部署，这是最简单的方式：
 
-### 2. 配置环境
+#### 1. 配置环境
 
 复制环境变量模板并配置：
 
@@ -61,10 +59,52 @@ AUTH_TOKEN=sk-123456
 
 # 功能开关
 ENABLE_TOOLIFY=true              # 启用工具调用功能
-DEBUG_LOGGING=true               # 启用详细日志
+DEBUG_LOGGING=false              # 生产环境建议关闭
 ```
 
-### 3. 启动服务
+#### 2. 启动服务
+
+```bash
+# 构建并启动容器
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose down
+```
+
+服务将在 `http://localhost:8080` 启动。
+
+#### 3. 更新服务
+
+```bash
+# 拉取最新代码后重新构建
+docker-compose up -d --build
+```
+
+### 方式二：本地部署
+
+如果你更喜欢在本地环境直接运行：
+
+#### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
+```
+
+#### 2. 配置环境
+
+复制环境变量模板并配置：
+
+```bash
+cp env_template.txt .env
+```
+
+编辑 `.env` 文件，配置以下关键参数（同上）。
+
+#### 3. 启动服务
 
 ```bash
 python main.py
@@ -210,7 +250,7 @@ response = client.chat.completions.create(
 
 ### 指定工具选择策略
 
-```python
+```
 # 强制调用指定函数
 response = client.chat.completions.create(
     model="GLM-4.5",
@@ -230,7 +270,7 @@ response = client.chat.completions.create(
 
 ### 流式工具调用
 
-```python
+```
 stream = client.chat.completions.create(
     model="GLM-4.5",
     messages=[{"role": "user", "content": "今天天气如何？"}],
@@ -247,7 +287,7 @@ for chunk in stream:
 
 运行集成测试：
 
-```bash
+```
 # 工具调用集成测试
 python tests/test_toolify_integration.py
 
@@ -292,9 +332,130 @@ python tests/test_non_stream.py
 | GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本     |
 | GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本 |
 
+## Docker 部署详解
+
+### Dockerfile 说明
+
+项目包含优化的 Dockerfile，具有以下特性：
+
+- 基于 `python:3.11-slim` 轻量级镜像
+- 多阶段构建优化，减少镜像体积
+- 内置健康检查
+- 自动创建必要的目录和文件
+
+### docker-compose.yml 配置
+
+`docker-compose.yml` 提供了完整的容器编排配置：
+
+```yaml
+version: '3.8'
+
+services:
+  openai-api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      # 环境变量配置
+    env_file:
+      - .env
+    volumes:
+      - ./tokens.txt:/app/data/tokens.txt:ro
+    restart: unless-stopped
+```
+
+### 常用 Docker 命令
+
+```bash
+# 构建镜像
+docker-compose build
+
+# 启动服务（后台运行）
+docker-compose up -d
+
+# 查看运行状态
+docker-compose ps
+
+# 查看实时日志
+docker-compose logs -f
+
+# 停止服务
+docker-compose stop
+
+# 停止并删除容器
+docker-compose down
+
+# 重启服务
+docker-compose restart
+
+# 进入容器
+docker-compose exec openai-api bash
+```
+
+### 环境变量配置
+
+Docker 部署支持两种环境变量配置方式：
+
+1. **通过 .env 文件**（推荐）：在项目根目录创建 `.env` 文件
+2. **通过 docker-compose.yml**：直接在 `environment` 部分配置
+
+**注意**：敏感信息（如 `ZAI_TOKEN` 和 `AUTH_TOKEN`）必须在 `.env` 文件中配置，不要提交到版本控制系统。
+
+### 数据持久化
+
+如果需要从文件读取多个 token，可以创建 `tokens.txt` 文件：
+
+```bash
+# 创建 tokens.txt 文件，每行一个 token
+echo "token1" > tokens.txt
+echo "token2" >> tokens.txt
+```
+
+Docker 容器会自动挂载此文件到容器内部。
+
+### 生产环境建议
+
+1. **资源限制**：在 `docker-compose.yml` 中添加资源限制
+
+```yaml
+services:
+  openai-api:
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+```
+
+2. **日志管理**：配置日志驱动和大小限制
+
+```yaml
+services:
+  openai-api:
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+```
+
+3. **网络隔离**：使用自定义网络提高安全性（已默认配置）
+4. **健康检查**：已内置健康检查，可根据需要调整参数
+
 ## 技术栈
 
 - **FastAPI**：高性能 Web 框架
 - **httpx**：异步 HTTP 客户端
 - **Pydantic**：数据验证
 - **Uvicorn**：ASGI 服务器
+- **Docker**：容器化部署
+
+## 参考项目
+
+本项目参考了以下开源项目：
+
+1. [z.ai2api_python](https://github.com/ZyphrZero/z.ai2api_python)
+2. [Toolify](https://github.com/funnycups/Toolify)
