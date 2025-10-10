@@ -5,7 +5,7 @@ Utility functions for the application
 import sys
 import logging
 import structlog
-from config import settings
+from .config import settings
 
 
 # 配置structlog

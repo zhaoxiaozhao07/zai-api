@@ -12,7 +12,7 @@ import hashlib
 from typing import Dict, Any, Optional
 from jose import jwt
 from jose.exceptions import JWTError
-from helpers import debug_log
+from .helpers import debug_log
 
 
 def decode_jwt_payload(token: str) -> Dict[str, Any]:

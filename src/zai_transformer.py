@@ -14,10 +14,10 @@ from dateutil import tz
 from datetime import datetime
 from browserforge.headers import HeaderGenerator
 
-from config import settings, MODEL_MAPPING
-from helpers import debug_log
-from signature import SignatureGenerator, decode_jwt_payload
-from token_pool import get_token_pool
+from .config import settings, MODEL_MAPPING
+from .helpers import debug_log
+from .signature import SignatureGenerator, decode_jwt_payload
+from .token_pool import get_token_pool
 
 
 # 全局 HeaderGenerator 实例（单例模式）

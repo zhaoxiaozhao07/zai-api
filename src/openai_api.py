@@ -10,10 +10,10 @@ from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 import httpx
 
-from config import settings
-from schemas import OpenAIRequest, ModelsResponse, Model
-from helpers import debug_log, get_logger
-from zai_transformer import ZAITransformer
+from .config import settings
+from .schemas import OpenAIRequest, ModelsResponse, Model
+from .helpers import debug_log, get_logger
+from .zai_transformer import ZAITransformer
 
 router = APIRouter()
 

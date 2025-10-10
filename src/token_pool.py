@@ -8,7 +8,7 @@ Token池管理模块
 import os
 from typing import List, Optional
 from pathlib import Path
-from helpers import debug_log
+from .helpers import debug_log
 
 
 class TokenPool:

@@ -8,8 +8,8 @@ Main application entry point - Simplified version for OpenAI format conversion o
 from fastapi import FastAPI, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import settings
-from openai_api import router as openai_router
+from src.config import settings
+from src.openai_api import router as openai_router
 
 # Create FastAPI app
 app = FastAPI(
