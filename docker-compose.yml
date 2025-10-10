@@ -1,10 +1,10 @@
 services:
   zai-api:
-    # 临时使用本地构建，测试代理修复
-    build:
-      context: .
-      dockerfile: Dockerfile
-    # image: julienol/zai-api:latest
+    # # 使用本地构建
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    image: julienol/zai-api:latest
     container_name: zai-api
     restart: unless-stopped
     ports:
