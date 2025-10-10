@@ -1,0 +1,8 @@
+__pycache__/
+
+*.pyc
+.vscode
+.env
+
+参考.py
+

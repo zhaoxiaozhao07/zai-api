@@ -1,0 +1,28 @@
+# FastAPI 和 Web 服务器
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# HTTP 客户端
+httpx[http2]>=0.25.0
+
+# JWT 处理（使用jose替代PyJWT，更专业的JWT处理）
+python-jose[cryptography]>=3.3.0
+
+# 结构化日志
+structlog>=23.2.0
+
+# 性能优化库
+fastuuid>=0.7.0
+
+# 时间处理
+python-dateutil>=2.8.0
+
+# URL处理
+furl>=2.1.0
+
+# 其他工具库
+browserforge>=1.0.0
+python-multipart>=0.0.6
+

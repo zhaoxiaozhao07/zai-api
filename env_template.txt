@@ -1,0 +1,37 @@
+# Z.AI API 配置
+# 使用时请将此文件复制为 .env
+# cp env_template.txt .env
+
+API_ENDPOINT=https://chat.z.ai/api/chat/completions
+
+# 本地API的访问密钥（用于验证客户端请求）
+AUTH_TOKEN=sk-123456
+
+# Z.AI Token（必须配置，用于访问Z.AI API）
+ZAI_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijc0MzIzNzQ3LTVhMTAtNDQ3My05ZjhmLTk5YjI2OWUwZDA0ZCIsImVtYWlsIjoib3FjZ3lrNWFodUBkdWNrbWFpbC5zYnMifQ.SJSZxgX4saVleREBpWdV1JIRxd_tJ_6cv3EflJFy8KXTSBSzYXmfVz9RZF5cF78aI3TY54eAONEjYuGbmYNYZQ
+
+# Z.AI 签名密钥（用于API请求签名，默认值：junjie）
+ZAI_SIGNING_SECRET=junjie
+
+# 模型配置
+PRIMARY_MODEL=GLM-4.5
+THINKING_MODEL=GLM-4.5-Thinking
+SEARCH_MODEL=GLM-4.5-Search
+AIR_MODEL=GLM-4.5-Air
+GLM_46_MODEL=GLM-4.6
+GLM_46_THINKING_MODEL=GLM-4.6-Thinking
+
+# 服务器配置
+LISTEN_PORT=8080
+DEBUG_LOGGING=true
+
+# 跳过客户端认证（仅开发环境使用）
+SKIP_AUTH_TOKEN=false
+
+# 请求配置
+MAX_RETRIES=3
+
+# 代理配置（可选）
+# HTTP_PROXY=http://127.0.0.1:7890
+# HTTPS_PROXY=http://127.0.0.1:7890
+
