@@ -690,7 +690,6 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",  # 禁用 Nginx/代理缓冲
             },
         )
 

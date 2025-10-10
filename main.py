@@ -60,11 +60,5 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=settings.LISTEN_PORT,
         reload=False,
-        log_level="info",
-        access_log=True,
-        # 关键：禁用缓冲，确保流式响应立即发送
-        timeout_keep_alive=5,
-        limit_concurrency=1000,
-        backlog=2048,
     )
 
