@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     HTTP_PROXY: Optional[str] = os.getenv("HTTP_PROXY")
     HTTPS_PROXY: Optional[str] = os.getenv("HTTPS_PROXY")
     
+    # Toolify Configuration - 工具调用功能配置
+    ENABLE_TOOLIFY: bool = os.getenv("ENABLE_TOOLIFY", "true").lower() == "true"
+    TOOLIFY_CUSTOM_PROMPT: Optional[str] = os.getenv("TOOLIFY_CUSTOM_PROMPT")
+    
     class Config:
         env_file = ".env"
 

@@ -1,5 +1,5 @@
 """
-OpenAI API endpoints - 优化版本
+OpenAI API endpoints - 优化版本（集成 Toolify 工具调用功能）
 """
 
 import time
@@ -14,6 +14,9 @@ from .config import settings
 from .schemas import OpenAIRequest, ModelsResponse, Model
 from .helpers import debug_log, get_logger
 from .zai_transformer import ZAITransformer
+from .toolify_handler import should_enable_toolify, prepare_toolify_request, parse_toolify_response
+from .toolify.detector import StreamingFunctionCallDetector
+from .toolify_config import get_toolify
 
 router = APIRouter()
 
@@ -144,13 +147,14 @@ async def list_models():
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, authorization: str = Header(...)):
-    """Handle chat completion requests with ZAI transformer - 支持流式和非流式"""
+    """Handle chat completion requests with ZAI transformer - 支持流式和非流式以及工具调用"""
     role = request.messages[0].role if request.messages else "unknown"
     debug_log(
         "收到客户端请求",
         model=request.model,
         stream=request.stream,
-        message_count=len(request.messages)
+        message_count=len(request.messages),
+        tools_count=len(request.tools) if request.tools else 0
     )
     
     try:
@@ -165,23 +169,50 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             
         # 转换请求
         request_dict = request.model_dump()
+        
+        # 检查是否需要启用工具调用
+        enable_toolify = should_enable_toolify(request_dict)
+        
+        # 准备消息列表
+        messages = [msg.model_dump() if hasattr(msg, 'model_dump') else msg for msg in request.messages]
+        
+        # 如果启用工具调用，预处理消息并注入提示词
+        if enable_toolify:
+            debug_log("[TOOLIFY] 工具调用功能已启用")
+            messages, _ = prepare_toolify_request(request_dict, messages)
+            # 从请求中移除 tools 和 tool_choice（已转换为提示词）
+            request_dict_for_transform = request_dict.copy()
+            request_dict_for_transform.pop("tools", None)
+            request_dict_for_transform.pop("tool_choice", None)
+            request_dict_for_transform["messages"] = messages
+        else:
+            request_dict_for_transform = request_dict
+        
         debug_log("开始转换请求格式: OpenAI -> Z.AI")
         
         # 初始转换
-        transformed = await transformer.transform_request_in(request_dict)
+        transformed = await transformer.transform_request_in(request_dict_for_transform)
         
         # 根据stream参数决定返回流式或非流式响应
         if not request.stream:
             debug_log("使用非流式模式")
-            return await handle_non_stream_request(request, transformed)
+            return await handle_non_stream_request(request, transformed, enable_toolify)
 
-        # 调用上游API
+        # 调用上游API（流式模式）
         async def stream_response():
-            """流式响应生成器（包含重试机制和智能退避策略）"""
+            """流式响应生成器（包含重试机制、智能退避策略和工具调用检测）"""
             nonlocal transformed  # 声明使用外部作用域的transformed变量
             retry_count = 0
             last_error = None
             last_status_code = None  # 记录上次失败的状态码
+            
+            # 如果启用工具调用，创建检测器
+            toolify_detector = None
+            if enable_toolify:
+                toolify_instance = get_toolify()
+                if toolify_instance:
+                    toolify_detector = StreamingFunctionCallDetector(toolify_instance.trigger_signal)
+                    debug_log("[TOOLIFY] 流式工具调用检测器已初始化")
 
             while retry_count <= settings.MAX_RETRIES:
                 try:
@@ -259,6 +290,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         # 处理状态
                         has_thinking = False
                         first_thinking_chunk = True
+                        accumulated_content = ""  # 累积内容用于工具调用检测
 
                         # 处理SSE流 - 使用 aiter_lines() 自动处理编码和行分割
                         buffer = ""
@@ -282,6 +314,20 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     chunk_str = current_line[5:].strip()
                                     if not chunk_str or chunk_str == "[DONE]":
                                         if chunk_str == "[DONE]":
+                                            # 流结束，检查是否有工具调用
+                                            if toolify_detector:
+                                                parsed_tools = toolify_detector.finalize()
+                                                if parsed_tools:
+                                                    debug_log("[TOOLIFY] 流结束时检测到工具调用")
+                                                    from .toolify_handler import format_toolify_response_for_stream
+                                                    tool_chunks = format_toolify_response_for_stream(
+                                                        parsed_tools, 
+                                                        request.model, 
+                                                        transformed["body"]["chat_id"]
+                                                    )
+                                                    for chunk in tool_chunks:
+                                                        yield chunk
+                                                    return
                                             yield "data: [DONE]\n\n"
                                         continue
 
@@ -294,6 +340,52 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
 
                                             # 处理思考内容
                                             if phase == "thinking":
+                                                delta_content = data.get("delta_content", "")
+                                                
+                                                # 工具调用检测
+                                                if toolify_detector and delta_content:
+                                                    is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
+                                                    
+                                                    if is_tool_detected:
+                                                        debug_log("[TOOLIFY] 在thinking阶段检测到工具调用触发信号")
+                                                        # 如果之前有输出内容，先发送
+                                                        if content_to_yield:
+                                                            if not has_thinking:
+                                                                has_thinking = True
+                                                                role_chunk = {
+                                                                    "choices": [{
+                                                                        "delta": {"role": "assistant"},
+                                                                        "finish_reason": None,
+                                                                        "index": 0,
+                                                                        "logprobs": None,
+                                                                    }],
+                                                                    "created": int(time.time()),
+                                                                    "id": transformed["body"]["chat_id"],
+                                                                    "model": request.model,
+                                                                    "object": "chat.completion.chunk",
+                                                                    "system_fingerprint": "fp_zai_001",
+                                                                }
+                                                                yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                            
+                                                            content_chunk = {
+                                                                "choices": [{
+                                                                    "delta": {"content": content_to_yield},
+                                                                    "finish_reason": None,
+                                                                    "index": 0,
+                                                                    "logprobs": None,
+                                                                }],
+                                                                "created": int(time.time()),
+                                                                "id": transformed["body"]["chat_id"],
+                                                                "model": request.model,
+                                                                "object": "chat.completion.chunk",
+                                                                "system_fingerprint": "fp_zai_001",
+                                                            }
+                                                            yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                        continue
+                                                    
+                                                    # 使用检测器处理后的内容
+                                                    delta_content = content_to_yield
+                                                
                                                 if not has_thinking:
                                                     has_thinking = True
                                                     role_chunk = {
@@ -311,7 +403,6 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     }
                                                     yield f"data: {json.dumps(role_chunk)}\n\n"
 
-                                                delta_content = data.get("delta_content", "")
                                                 if delta_content:
                                                     if delta_content.startswith("<details"):
                                                         content = (
@@ -350,6 +441,50 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                             elif phase == "answer":
                                                 edit_content = data.get("edit_content", "")
                                                 delta_content = data.get("delta_content", "")
+                                                
+                                                # 工具调用检测
+                                                if toolify_detector and delta_content:
+                                                    is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
+                                                    
+                                                    if is_tool_detected:
+                                                        debug_log("[TOOLIFY] 在answer阶段检测到工具调用触发信号")
+                                                        # 如果之前有输出内容，先发送
+                                                        if content_to_yield:
+                                                            if not has_thinking:
+                                                                has_thinking = True
+                                                                role_chunk = {
+                                                                    "choices": [{
+                                                                        "delta": {"role": "assistant"},
+                                                                        "finish_reason": None,
+                                                                        "index": 0,
+                                                                        "logprobs": None,
+                                                                    }],
+                                                                    "created": int(time.time()),
+                                                                    "id": transformed["body"]["chat_id"],
+                                                                    "model": request.model,
+                                                                    "object": "chat.completion.chunk",
+                                                                    "system_fingerprint": "fp_zai_001",
+                                                                }
+                                                                yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                            
+                                                            content_chunk = {
+                                                                "choices": [{
+                                                                    "delta": {"content": content_to_yield},
+                                                                    "finish_reason": None,
+                                                                    "index": 0,
+                                                                    "logprobs": None,
+                                                                }],
+                                                                "created": int(time.time()),
+                                                                "id": transformed["body"]["chat_id"],
+                                                                "model": request.model,
+                                                                "object": "chat.completion.chunk",
+                                                                "system_fingerprint": "fp_zai_001",
+                                                            }
+                                                            yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                        continue
+                                                    
+                                                    # 使用检测器处理后的内容
+                                                    delta_content = content_to_yield
 
                                                 if not has_thinking:
                                                     has_thinking = True
@@ -538,7 +673,7 @@ def create_openai_response(chat_id: str, model: str, content: str, reasoning_con
     return response
 
 
-async def handle_non_stream_request(request: OpenAIRequest, transformed: dict) -> dict:
+async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, enable_toolify: bool = False) -> dict:
     """
     处理非流式请求
     
@@ -705,6 +840,28 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict) -
                 # 若没有聚合到答案，但有思考内容，则保底返回思考内容
                 if not final_content and reasoning_content:
                     final_content = reasoning_content
+                
+                # 工具调用检测（非流式模式）
+                if enable_toolify and final_content:
+                    debug_log("[TOOLIFY] 检查非流式响应中的工具调用")
+                    tool_response = parse_toolify_response(final_content, request.model)
+                    if tool_response:
+                        debug_log("[TOOLIFY] 非流式响应中检测到工具调用")
+                        # 返回包含tool_calls的响应
+                        return {
+                            "id": transformed["body"]["chat_id"],
+                            "object": "chat.completion",
+                            "created": int(time.time()),
+                            "model": request.model,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "message": tool_response,
+                                    "finish_reason": "tool_calls"
+                                }
+                            ],
+                            "usage": usage_info
+                        }
                 
                 debug_log(
                     "非流式响应聚合完成",
