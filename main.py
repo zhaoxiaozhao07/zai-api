@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Main application entry point - Simplified version for OpenAI format conversion only
+Main application entry point - OpenAI format conversion
 """
 
 from fastapi import FastAPI, Response
@@ -13,8 +13,8 @@ from src.openai_api import router as openai_router
 
 # Create FastAPI app
 app = FastAPI(
-    title="OpenAI Compatible API Server (Simplified)",
-    description="A simplified OpenAI-compatible API server for Z.AI chat service",
+    title="OpenAI Compatible API Server",
+    description="OpenAI-compatible API server for Z.AI chat service",
     version="1.0.0-dev",
 )
 
@@ -41,9 +41,9 @@ async def handle_options():
 async def root():
     """Root endpoint"""
     return {
-        "message": "OpenAI Compatible API Server (Simplified)",
+        "message": "OpenAI Compatible API Server",
         "version": "1.0.0-dev",
-        "description": "仅包含OpenAI格式转换功能，不含工具调用"
+        "description": "OpenAI格式转换功，含工具调用"
     }
 
 

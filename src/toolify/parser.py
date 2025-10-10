@@ -95,7 +95,10 @@ def parse_function_calls_xml(xml_string: str, trigger_signal: str) -> Optional[L
     # 查找function_calls标签
     calls_content_match = re.search(r"<function_calls>([\s\S]*?)</function_calls>", content_after_signal)
     if not calls_content_match:
-        logger.debug(f"[TOOLIFY] 未找到function_calls标签")
+        logger.warning(f"[TOOLIFY] 未找到function_calls标签！内容: {repr(content_after_signal[:300])}")
+        # 检查是否有不完整的function_calls开始标签
+        if "<function_calls" in content_after_signal:
+            logger.warning(f"[TOOLIFY] 发现不完整的function_calls开始标签，但没有结束标签")
         return None
     
     calls_content = calls_content_match.group(1)

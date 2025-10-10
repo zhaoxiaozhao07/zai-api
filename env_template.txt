@@ -26,7 +26,7 @@ GLM_46_THINKING_MODEL=GLM-4.6-Thinking
 
 # 服务器配置
 LISTEN_PORT=8080
-DEBUG_LOGGING=true
+DEBUG_LOGGING=false
 
 # 跳过客户端认证（仅开发环境使用）
 SKIP_AUTH_TOKEN=false

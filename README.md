@@ -10,6 +10,8 @@
 - **Z.AI 后端集成**：自动转换并调用 Z.AI API
 - **多模型支持**：支持 GLM-4.5、GLM-4.6、Thinking、Search、Air 等多个模型
 - **流式和非流式**：同时支持流式（SSE）和非流式响应模式
+- CC支持：支持通过Claude Code Router接入到CC中
+- Code插件支持：支持Cline、Roo Code、Kilo Code等第三方插件
 
 ### 工具调用（Function Calling）
 
@@ -120,35 +122,35 @@ response = client.chat.completions.create(
 
 ### 环境变量
 
-| 变量名 | 说明 | 默认值 |
-|--------|------|--------|
-| `API_ENDPOINT` | Z.AI API 地址 | `https://chat.z.ai/api/chat/completions` |
-| `ZAI_TOKEN` | Z.AI 认证 Token | - |
-| `ZAI_SIGNING_SECRET` | 签名密钥 | `junjie` |
-| `AUTH_TOKEN` | API Key（客户端认证） | `sk-your-api-key` |
-| `LISTEN_PORT` | 服务监听端口 | `8080` |
-| `PRIMARY_MODEL` | 主模型名称 | `GLM-4.5` |
-| `THINKING_MODEL` | 思考模型名称 | `GLM-4.5-Thinking` |
-| `SEARCH_MODEL` | 搜索模型名称 | `GLM-4.5-Search` |
-| `AIR_MODEL` | Air 模型名称 | `GLM-4.5-Air` |
-| `GLM_46_MODEL` | GLM-4.6 模型名称 | `GLM-4.6` |
-| `GLM_46_THINKING_MODEL` | GLM-4.6 思考模型 | `GLM-4.6-Thinking` |
-| `ENABLE_TOOLIFY` | 启用工具调用功能 | `true` |
-| `TOOLIFY_CUSTOM_PROMPT` | 自定义工具调用提示词 | - |
-| `DEBUG_LOGGING` | 详细日志输出 | `true` |
-| `SKIP_AUTH_TOKEN` | 跳过认证（用于测试） | `false` |
-| `MAX_RETRIES` | 请求重试次数 | `3` |
-| `HTTP_PROXY` | HTTP 代理地址 | - |
-| `HTTPS_PROXY` | HTTPS 代理地址 | - |
+| 变量名                    | 说明                  | 默认值                                     |
+| ------------------------- | --------------------- | ------------------------------------------ |
+| `API_ENDPOINT`          | Z.AI API 地址         | `https://chat.z.ai/api/chat/completions` |
+| `ZAI_TOKEN`             | Z.AI 认证 Token       | -                                          |
+| `ZAI_SIGNING_SECRET`    | 签名密钥              | `junjie`                                 |
+| `AUTH_TOKEN`            | API Key（客户端认证） | `sk-your-api-key`                        |
+| `LISTEN_PORT`           | 服务监听端口          | `8080`                                   |
+| `PRIMARY_MODEL`         | 主模型名称            | `GLM-4.5`                                |
+| `THINKING_MODEL`        | 思考模型名称          | `GLM-4.5-Thinking`                       |
+| `SEARCH_MODEL`          | 搜索模型名称          | `GLM-4.5-Search`                         |
+| `AIR_MODEL`             | Air 模型名称          | `GLM-4.5-Air`                            |
+| `GLM_46_MODEL`          | GLM-4.6 模型名称      | `GLM-4.6`                                |
+| `GLM_46_THINKING_MODEL` | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
+| `ENABLE_TOOLIFY`        | 启用工具调用功能      | `true`                                   |
+| `TOOLIFY_CUSTOM_PROMPT` | 自定义工具调用提示词  | -                                          |
+| `DEBUG_LOGGING`         | 详细日志输出          | `true`                                   |
+| `SKIP_AUTH_TOKEN`       | 跳过认证（用于测试）  | `false`                                  |
+| `MAX_RETRIES`           | 请求重试次数          | `3`                                      |
+| `HTTP_PROXY`            | HTTP 代理地址         | -                                          |
+| `HTTPS_PROXY`           | HTTPS 代理地址        | -                                          |
 
 ## API 端点
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/` | GET | 服务信息 |
-| `/health` | GET | 健康检查 |
+| 端点                     | 方法 | 说明                    |
+| ------------------------ | ---- | ----------------------- |
+| `/`                    | GET  | 服务信息                |
+| `/health`              | GET  | 健康检查                |
 | `/v1/chat/completions` | POST | 聊天补全（兼容 OpenAI） |
-| `/v1/models` | GET | 模型列表 |
+| `/v1/models`           | GET  | 模型列表                |
 
 ## 工具调用示例
 
@@ -281,13 +283,13 @@ python tests/test_non_stream.py
 
 ## 支持的模型
 
-| 模型名称 | Z.AI 后端模型 | 说明 |
-|---------|--------------|------|
-| GLM-4.5 | 0727-360B-API | 主模型 |
-| GLM-4.5-Thinking | 0727-360B-API | 思考模型 |
-| GLM-4.5-Search | 0727-360B-API | 搜索模型 |
-| GLM-4.5-Air | 0727-106B-API | 轻量级模型 |
-| GLM-4.6 | GLM-4-6-API-V1 | 4.6 版本 |
+| 模型名称         | Z.AI 后端模型  | 说明         |
+| ---------------- | -------------- | ------------ |
+| GLM-4.5          | 0727-360B-API  | 主模型       |
+| GLM-4.5-Thinking | 0727-360B-API  | 思考模型     |
+| GLM-4.5-Search   | 0727-360B-API  | 搜索模型     |
+| GLM-4.5-Air      | 0727-106B-API  | 轻量级模型   |
+| GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本     |
 | GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本 |
 
 ## 技术栈
@@ -296,4 +298,3 @@ python tests/test_non_stream.py
 - **httpx**：异步 HTTP 客户端
 - **Pydantic**：数据验证
 - **Uvicorn**：ASGI 服务器
-

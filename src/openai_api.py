@@ -316,7 +316,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                         if chunk_str == "[DONE]":
                                             # 流结束，检查是否有工具调用
                                             if toolify_detector:
+                                                debug_log(f"[TOOLIFY] 流结束，检测器状态: {toolify_detector.state}, 缓冲区长度: {len(toolify_detector.content_buffer)}")
+                                                debug_log(f"[TOOLIFY] 缓冲区内容: {repr(toolify_detector.content_buffer[:500])}")
                                                 parsed_tools = toolify_detector.finalize()
+                                                debug_log(f"[TOOLIFY] finalize()结果: {parsed_tools}")
                                                 if parsed_tools:
                                                     debug_log("[TOOLIFY] 流结束时检测到工具调用")
                                                     from .toolify_handler import format_toolify_response_for_stream
@@ -328,6 +331,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     for chunk in tool_chunks:
                                                         yield chunk
                                                     return
+                                                else:
+                                                    debug_log("[TOOLIFY] finalize()返回空，未检测到工具调用")
                                             yield "data: [DONE]\n\n"
                                         continue
 
@@ -347,9 +352,12 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
                                                     
                                                     if is_tool_detected:
-                                                        debug_log("[TOOLIFY] 在thinking阶段检测到工具调用触发信号")
+                                                        debug_log(f"[TOOLIFY] 在thinking阶段检测到工具调用触发信号，缓冲区长度: {len(toolify_detector.content_buffer)}")
+                                                        debug_log(f"[TOOLIFY] 检测时缓冲区内容: {repr(toolify_detector.content_buffer[:200])}")
+                                                        debug_log(f"[TOOLIFY] 检测器当前状态: {toolify_detector.state}")
                                                         # 如果之前有输出内容，先发送
                                                         if content_to_yield:
+                                                            debug_log(f"[TOOLIFY] 输出触发信号前的内容: {repr(content_to_yield[:100])}")
                                                             if not has_thinking:
                                                                 has_thinking = True
                                                                 role_chunk = {
@@ -381,6 +389,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                 "system_fingerprint": "fp_zai_001",
                                                             }
                                                             yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                        debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
                                                         continue
                                                     
                                                     # 使用检测器处理后的内容
@@ -447,9 +456,12 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
                                                     
                                                     if is_tool_detected:
-                                                        debug_log("[TOOLIFY] 在answer阶段检测到工具调用触发信号")
+                                                        debug_log(f"[TOOLIFY] 在answer阶段检测到工具调用触发信号，缓冲区长度: {len(toolify_detector.content_buffer)}")
+                                                        debug_log(f"[TOOLIFY] 检测时缓冲区内容: {repr(toolify_detector.content_buffer[:200])}")
+                                                        debug_log(f"[TOOLIFY] 检测器当前状态: {toolify_detector.state}")
                                                         # 如果之前有输出内容，先发送
                                                         if content_to_yield:
+                                                            debug_log(f"[TOOLIFY] 输出触发信号前的内容: {repr(content_to_yield[:100])}")
                                                             if not has_thinking:
                                                                 has_thinking = True
                                                                 role_chunk = {
@@ -481,6 +493,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                 "system_fingerprint": "fp_zai_001",
                                                             }
                                                             yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                        debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
                                                         continue
                                                     
                                                     # 使用检测器处理后的内容
@@ -579,6 +592,25 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
 
                                             # 处理完成
                                             if data.get("usage"):
+                                                debug_log("[TOOLIFY] 收到usage信息，检查是否有工具调用")
+                                                # 检查是否有工具调用
+                                                if toolify_detector:
+                                                    debug_log(f"[TOOLIFY] usage处理 - 检测器状态: {toolify_detector.state}, 缓冲区长度: {len(toolify_detector.content_buffer)}")
+                                                    parsed_tools = toolify_detector.finalize()
+                                                    debug_log(f"[TOOLIFY] usage处理 - finalize()结果: {parsed_tools}")
+                                                    if parsed_tools:
+                                                        debug_log("[TOOLIFY] usage处理 - 检测到工具调用，输出工具调用结果")
+                                                        from .toolify_handler import format_toolify_response_for_stream
+                                                        tool_chunks = format_toolify_response_for_stream(
+                                                            parsed_tools, 
+                                                            request.model, 
+                                                            transformed["body"]["chat_id"]
+                                                        )
+                                                        for chunk in tool_chunks:
+                                                            yield chunk
+                                                        return
+                                                
+                                                debug_log("[TOOLIFY] usage处理 - 没有工具调用，正常结束流")
                                                 finish_chunk = {
                                                     "choices": [{
                                                         "delta": {},
@@ -607,6 +639,25 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                         debug_log("处理chunk错误", error=str(e))
 
                         debug_log("SSE 流处理完成", line_count=line_count)
+                        
+                        # 流自然结束，检查是否有工具调用
+                        if toolify_detector:
+                            debug_log(f"[TOOLIFY] 流自然结束 - 检测器状态: {toolify_detector.state}, 缓冲区长度: {len(toolify_detector.content_buffer)}")
+                            parsed_tools = toolify_detector.finalize()
+                            debug_log(f"[TOOLIFY] 流自然结束 - finalize()结果: {parsed_tools}")
+                            if parsed_tools:
+                                debug_log("[TOOLIFY] 流自然结束 - 检测到工具调用，输出工具调用结果")
+                                from .toolify_handler import format_toolify_response_for_stream
+                                tool_chunks = format_toolify_response_for_stream(
+                                    parsed_tools, 
+                                    request.model, 
+                                    transformed["body"]["chat_id"]
+                                )
+                                for chunk in tool_chunks:
+                                    yield chunk
+                                return
+                        
+                        debug_log("[TOOLIFY] 流自然结束 - 没有工具调用，正常结束")
                         yield "data: [DONE]\n\n"
                         return
 
