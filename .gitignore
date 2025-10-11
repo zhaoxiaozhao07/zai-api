@@ -48,6 +48,7 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+test.*
 
 # Project specific
 tokens.txt

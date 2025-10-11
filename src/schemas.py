@@ -6,10 +6,17 @@ from typing import Dict, List, Optional, Any, Union, Literal
 from pydantic import BaseModel, Field
 
 
+class ImageUrl(BaseModel):
+    """Image URL model"""
+    url: str
+    detail: Optional[str] = "auto"
+
+
 class ContentPart(BaseModel):
     """Content part model for OpenAI's new content format"""
     type: str
     text: Optional[str] = None
+    image_url: Optional[ImageUrl] = None
 
 
 class ToolFunction(BaseModel):

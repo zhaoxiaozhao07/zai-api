@@ -220,8 +220,11 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         
         debug_log("开始转换请求格式: OpenAI -> Z.AI")
         
-        # 初始转换
-        transformed = await transformer.transform_request_in(request_dict_for_transform)
+        # 获取全局HTTP客户端（用于图像上传）
+        client = await get_http_client()
+        
+        # 初始转换（传入client用于图像上传）
+        transformed = await transformer.transform_request_in(request_dict_for_transform, client=client)
         
         # 根据stream参数决定返回流式或非流式响应
         if not request.stream:
@@ -304,7 +307,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
                                     new_token = transformer.switch_token()
                                     # 使用新token重新生成请求
-                                    transformed = await transformer.transform_request_in(request_dict)
+                                    transformed = await transformer.transform_request_in(request_dict, client=client)
                                     debug_log(f"[OK] 已切换token并重新生成请求")
                                 
                                 continue
@@ -990,7 +993,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             new_token = transformer.switch_token()
                             # 使用新token重新生成请求
                             request_dict = request.model_dump()
-                            transformed = await transformer.transform_request_in(request_dict)
+                            transformed = await transformer.transform_request_in(request_dict, client=client)
                             debug_log(f"[OK] 已切换token并重新生成请求")
                         
                         continue

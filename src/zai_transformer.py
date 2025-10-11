@@ -7,7 +7,7 @@ ZAI格式转换器
 
 import time
 import random
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, List, Optional
 from functools import lru_cache
 from fastuuid import uuid4
 from furl import furl
@@ -19,6 +19,7 @@ from .config import settings, MODEL_MAPPING
 from .helpers import debug_log, perf_timer, perf_track
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
+from .image_handler import process_image_content
 
 
 # 全局 HeaderGenerator 实例（单例模式）
@@ -264,17 +265,18 @@ class ZAITransformer:
         token = token_pool.switch_to_next()
         return token
     
-    def _process_messages(self, messages: list) -> list:
+    def _process_messages(self, messages: list) -> Tuple[list, list]:
         """
-        处理消息列表，转换system角色和处理图片内容
+        处理消息列表，转换system角色和提取图片内容
         
         Args:
             messages: 原始消息列表
             
         Returns:
-            处理后的消息列表
+            (处理后的消息列表, 图片URL列表)
         """
         processed_messages = []
+        image_urls = []
         
         for idx, orig_msg in enumerate(messages):
             msg = orig_msg.copy()
@@ -302,15 +304,24 @@ class ZAITransformer:
                             and part.get("image_url", {}).get("url")
                             and isinstance(part["image_url"]["url"], str)
                         ):
+                            image_url = part["image_url"]["url"]
                             debug_log(f"    消息[{idx}]内容[{part_idx}]: 检测到图片URL")
+                            image_urls.append(image_url)
+                            # 移除图片内容，只保留文本
+                        elif part.get("type") == "text":
                             new_content.append(part)
-                        else:
-                            new_content.append(part)
-                    msg["content"] = new_content
+                    
+                    # 如果new_content只有文本，提取为字符串
+                    if len(new_content) == 1 and new_content[0].get("type") == "text":
+                        msg["content"] = new_content[0].get("text", "")
+                    elif new_content:
+                        msg["content"] = new_content
+                    else:
+                        msg["content"] = ""
 
             processed_messages.append(msg)
         
-        return processed_messages
+        return processed_messages, image_urls
     
     def _extract_last_user_content(self, messages: list) -> str:
         """
@@ -337,7 +348,7 @@ class ZAITransformer:
         return user_content
 
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
-    async def transform_request_in(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    async def transform_request_in(self, request: Dict[str, Any], client=None) -> Dict[str, Any]:
         """转换OpenAI请求为z.ai格式"""
         debug_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
@@ -356,10 +367,10 @@ class ZAITransformer:
         upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
         debug_log(f"  模型映射: {requested_model} -> {upstream_model_id}")
 
-        # 处理消息列表
+        # 处理消息列表并提取图像
         debug_log(f"  开始处理 {len(request.get('messages', []))} 条消息")
         with perf_timer("process_messages", threshold_ms=5):
-            messages = self._process_messages(request.get("messages", []))
+            messages, image_urls = self._process_messages(request.get("messages", []))
 
         # 构建MCP服务器列表
         mcp_servers = []
@@ -374,6 +385,23 @@ class ZAITransformer:
             {"type": "mcp", "server": "image-search", "status": "hidden"},
             {"type": "mcp", "server": "deep-research", "status": "hidden"}
         ]
+        
+        # 处理图像上传
+        files_list = []
+        if image_urls and client:
+            debug_log(f"检测到 {len(image_urls)} 张图像，开始上传")
+            for idx, image_url in enumerate(image_urls):
+                try:
+                    file_obj = await process_image_content(image_url, token, client)
+                    if file_obj:
+                        files_list.append(file_obj)
+                        debug_log(f"图像 [{idx+1}/{len(image_urls)}] 上传成功", file_id=file_obj.get("id"))
+                    else:
+                        debug_log(f"图像 [{idx+1}/{len(image_urls)}] 上传失败")
+                except Exception as e:
+                    debug_log(f"图像 [{idx+1}/{len(image_urls)}] 处理错误: {e}")
+        elif image_urls:
+            debug_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
             
         # 构建上游请求体
         chat_id = generate_uuid()
@@ -411,6 +439,11 @@ class ZAITransformer:
             "chat_id": chat_id,
             "id": generate_uuid(),
         }
+        
+        # 如果有上传的文件，添加到body中
+        if files_list:
+            body["files"] = files_list
+            debug_log(f"添加 {len(files_list)} 个文件到请求body")
 
         # 生成时间戳和请求ID
         timestamp = int(time.time() * 1000)
