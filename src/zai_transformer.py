@@ -265,12 +265,13 @@ class ZAITransformer:
         token = token_pool.switch_to_next()
         return token
     
-    def _process_messages(self, messages: list) -> Tuple[list, list]:
+    def _process_messages(self, messages: list, is_vision_model: bool = False) -> Tuple[list, list]:
         """
         处理消息列表，转换system角色和提取图片内容
         
         Args:
             messages: 原始消息列表
+            is_vision_model: 是否是视觉模型（GLM-4.5V），视觉模型保留图片在messages中
             
         Returns:
             (处理后的消息列表, 图片URL列表)
@@ -307,7 +308,11 @@ class ZAITransformer:
                             image_url = part["image_url"]["url"]
                             debug_log(f"    消息[{idx}]内容[{part_idx}]: 检测到图片URL")
                             image_urls.append(image_url)
-                            # 移除图片内容，只保留文本
+                            
+                            # 视觉模型：保留图片在消息中，但会在上传后修改URL格式
+                            if is_vision_model:
+                                new_content.append(part)
+                            # 非视觉模型：移除图片内容，只保留文本
                         elif part.get("type") == "text":
                             new_content.append(part)
                     
@@ -362,6 +367,7 @@ class ZAITransformer:
                       request.get("reasoning", False))
         is_search = (requested_model == settings.SEARCH_MODEL or 
                     requested_model == settings.GLM_46_SEARCH_MODEL)
+        is_vision_model = (requested_model == settings.GLM_45V_MODEL)
 
         # 获取上游模型ID
         upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
@@ -370,7 +376,7 @@ class ZAITransformer:
         # 处理消息列表并提取图像
         debug_log(f"  开始处理 {len(request.get('messages', []))} 条消息")
         with perf_timer("process_messages", threshold_ms=5):
-            messages, image_urls = self._process_messages(request.get("messages", []))
+            messages, image_urls = self._process_messages(request.get("messages", []), is_vision_model=is_vision_model)
 
         # 构建MCP服务器列表
         mcp_servers = []
@@ -388,13 +394,20 @@ class ZAITransformer:
         
         # 处理图像上传
         files_list = []
+        uploaded_files_map = {}  # 用于GLM-4.5V：原始URL -> 文件信息的映射
+        
         if image_urls and client:
             debug_log(f"检测到 {len(image_urls)} 张图像，开始上传")
             for idx, image_url in enumerate(image_urls):
                 try:
                     file_obj = await process_image_content(image_url, token, client)
                     if file_obj:
-                        files_list.append(file_obj)
+                        # 非视觉模型：添加到files列表
+                        if not is_vision_model:
+                            files_list.append(file_obj)
+                        else:
+                            # 视觉模型：保存映射关系，稍后修改messages中的URL
+                            uploaded_files_map[image_url] = file_obj
                         debug_log(f"图像 [{idx+1}/{len(image_urls)}] 上传成功", file_id=file_obj.get("id"))
                     else:
                         debug_log(f"图像 [{idx+1}/{len(image_urls)}] 上传失败")
@@ -402,6 +415,27 @@ class ZAITransformer:
                     debug_log(f"图像 [{idx+1}/{len(image_urls)}] 处理错误: {e}")
         elif image_urls:
             debug_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
+        
+        # GLM-4.5V特殊处理：修改messages中的图片URL格式
+        if is_vision_model and uploaded_files_map:
+            debug_log(f"[GLM-4.5V] 开始修改消息中的图片URL格式")
+            for msg in messages:
+                if msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                    for part in msg["content"]:
+                        if part.get("type") == "image_url":
+                            original_url = part.get("image_url", {}).get("url")
+                            if original_url in uploaded_files_map:
+                                file_info = uploaded_files_map[original_url]
+                                # 提取file信息
+                                file_data = file_info.get("file", {})
+                                file_id = file_data.get("id", "")
+                                filename = file_data.get("filename", "image.png")
+                                # 构造GLM-4.5V格式的URL: {file_id}_{filename}
+                                new_url = f"{file_id}_{filename}"
+                                part["image_url"]["url"] = new_url
+                                debug_log(f"[GLM-4.5V] 图片URL已转换", 
+                                         original=original_url[:50], 
+                                         new=new_url)
             
         # 构建上游请求体
         chat_id = generate_uuid()
@@ -440,10 +474,12 @@ class ZAITransformer:
             "id": generate_uuid(),
         }
         
-        # 如果有上传的文件，添加到body中
-        if files_list:
+        # 如果有上传的文件，添加到body中（GLM-4.5V除外，它的图片已在messages中）
+        if files_list and not is_vision_model:
             body["files"] = files_list
             debug_log(f"添加 {len(files_list)} 个文件到请求body")
+        elif is_vision_model and uploaded_files_map:
+            debug_log(f"[GLM-4.5V] 图片已保留在messages中，不添加files字段")
 
         # 生成时间戳和请求ID
         timestamp = int(time.time() * 1000)

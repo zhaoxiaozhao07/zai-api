@@ -167,6 +167,7 @@ async def list_models():
             Model(id=settings.THINKING_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.SEARCH_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.AIR_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=settings.GLM_45V_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46_THINKING_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46_SEARCH_MODEL, created=current_time, owned_by="z.ai"),

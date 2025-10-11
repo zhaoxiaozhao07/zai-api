@@ -17,7 +17,30 @@ ZAI_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijc0MzIzNzQ3LTVhMTAtNDQ3M
 LISTEN_PORT=8080
 DEBUG_LOGGING=false
 
-# ！以下内容不优化代码，不要修改！
+
+# 跳过客户端认证（仅开发环境使用）
+SKIP_AUTH_TOKEN=false
+
+# 请求配置
+MAX_RETRIES=3
+
+# Toolify 工具调用功能配置
+# 启用后，API将支持OpenAI兼容的function calling
+ENABLE_TOOLIFY=true
+
+# 自定义工具调用提示词模板（可选），如果不设置，将使用默认模板
+# 模板中必须包含 {tools_list} 和 {trigger_signal} 占位符
+# TOOLIFY_CUSTOM_PROMPT=
+
+# 代理配置（可选）
+# 如果需要使用代理，取消注释并设置代理地址
+# 如果不需要代理，保持注释状态或留空
+HTTP_PROXY=
+HTTPS_PROXY=
+
+
+
+# ！不优化代码，不要修改以下内容！
 
 # Z.AI 签名密钥（用于API请求签名，默认值：junjie），请勿修改
 ZAI_SIGNING_SECRET=junjie
@@ -27,31 +50,10 @@ PRIMARY_MODEL=GLM-4.5
 THINKING_MODEL=GLM-4.5-Thinking
 SEARCH_MODEL=GLM-4.5-Search
 AIR_MODEL=GLM-4.5-Air
+GLM_45V_MODEL=GLM-4.5V
 GLM_46_MODEL=GLM-4.6
 GLM_46_THINKING_MODEL=GLM-4.6-Thinking
 GLM_46_SEARCH_MODEL=GLM-4.6-Search
 
-# 跳过客户端认证（仅开发环境使用）
-SKIP_AUTH_TOKEN=false
 
-# 请求配置
-MAX_RETRIES=3
-
-# 代理配置（可选）
-# 如果需要使用代理，取消注释并设置代理地址
-# 如果不需要代理，保持注释状态或留空
-HTTP_PROXY=
-HTTPS_PROXY=
-
-# ========================================
-# Toolify 工具调用功能配置
-# ========================================
-# 是否启用工具调用功能 (true/false)
-# 启用后，API将支持OpenAI兼容的function calling
-ENABLE_TOOLIFY=true
-
-# 自定义工具调用提示词模板（可选）
-# 如果不设置，将使用默认模板
-# 模板中必须包含 {tools_list} 和 {trigger_signal} 占位符
-# TOOLIFY_CUSTOM_PROMPT=
 

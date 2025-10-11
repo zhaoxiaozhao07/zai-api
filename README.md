@@ -173,9 +173,10 @@ response = client.chat.completions.create(
 | `THINKING_MODEL`        | 思考模型名称          | `GLM-4.5-Thinking`                       |
 | `SEARCH_MODEL`          | 搜索模型名称          | `GLM-4.5-Search`                         |
 | `AIR_MODEL`             | Air 模型名称          | `GLM-4.5-Air`                            |
+| `GLM_45V_MODEL`         | GLM-4.5V 视觉模型     | `GLM-4.5V`                               |
 | `GLM_46_MODEL`          | GLM-4.6 模型名称      | `GLM-4.6`                                |
 | `GLM_46_THINKING_MODEL` | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
-| `GLM_46_SEARCH_MODEL` | GLM-4.6 搜索模型      | `GLM-4.6-Search`                       |
+| `GLM_46_SEARCH_MODEL`   | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
 | `ENABLE_TOOLIFY`        | 启用工具调用功能      | `true`                                   |
 | `TOOLIFY_CUSTOM_PROMPT` | 自定义工具调用提示词  | -                                          |
 | `DEBUG_LOGGING`         | 详细日志输出          | `true`                                   |
@@ -324,14 +325,18 @@ python tests/test_non_stream.py
 
 ## 支持的模型
 
-| 模型名称         | Z.AI 后端模型  | 说明         |
-| ---------------- | -------------- | ------------ |
-| GLM-4.5          | 0727-360B-API  | 主模型       |
-| GLM-4.5-Thinking | 0727-360B-API  | 思考模型     |
-| GLM-4.5-Search   | 0727-360B-API  | 搜索模型     |
-| GLM-4.5-Air      | 0727-106B-API  | 轻量级模型   |
-| GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本     |
-| GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本 |
+| 模型名称         | Z.AI 后端模型  | 说明                     |
+| ---------------- | -------------- | ----------------------- |
+| GLM-4.5          | 0727-360B-API  | 主模型                   |
+| GLM-4.5-Thinking | 0727-360B-API  | 思考模型                 |
+| GLM-4.5-Search   | 0727-360B-API  | 搜索模型                 |
+| GLM-4.5-Air      | 0727-106B-API  | 轻量级模型               |
+| GLM-4.5V         | glm-4.5v       | 视觉模型                 |
+| GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本                 |
+| GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本             |
+| GLM-4.6-Search   | GLM-4-6-API-V1 | 4.6 搜索版本             |
+
+`所有模型均支持图像上传`
 
 ## 参考项目
 
