@@ -191,13 +191,45 @@ def build_query_params(
         url = furl("https://chat.z.ai")
         pathname = "/"
     
+    # 构建完整的查询参数，包括浏览器指纹信息
     query_params = {
         "timestamp": str(timestamp),
         "requestId": request_id,
         "user_id": user_id,
+        "version": "0.0.1",
+        "platform": "web",
         "token": token,
-        "current_url": str(url),  # furl自动处理URL编码
+        "user_agent": user_agent,
+        "language": "zh-CN",
+        "languages": "zh-CN,zh",
+        "timezone": "Asia/Shanghai",
+        "cookie_enabled": "true",
+        "screen_width": "2048",
+        "screen_height": "1152",
+        "screen_resolution": "2048x1152",
+        "viewport_height": "654",
+        "viewport_width": "1038",
+        "viewport_size": "1038x654",
+        "color_depth": "24",
+        "pixel_ratio": "1.25",
+        "current_url": str(url),
         "pathname": pathname,
+        "search": "",
+        "hash": "",
+        "host": "chat.z.ai",
+        "hostname": "chat.z.ai",
+        "protocol": "https:",
+        "referrer": "",
+        "title": "Z.ai Chat - Free AI powered by GLM-4.6 & GLM-4.5",
+        "timezone_offset": "-480",
+        "local_time": datetime.now(tz=get_timezone("Asia/Shanghai")).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "utc_time": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT"),
+        "is_mobile": "false",
+        "is_touch": "false",
+        "max_touch_points": "10",
+        "browser_name": "Chrome",
+        "os_name": "Windows",
+        "signature_timestamp": str(timestamp),
     }
     
     return query_params
@@ -317,7 +349,8 @@ class ZAITransformer:
         is_thinking = (requested_model == settings.THINKING_MODEL or 
                       requested_model == settings.GLM_46_THINKING_MODEL or 
                       request.get("reasoning", False))
-        is_search = requested_model == settings.SEARCH_MODEL
+        is_search = (requested_model == settings.SEARCH_MODEL or 
+                    requested_model == settings.GLM_46_SEARCH_MODEL)
 
         # 获取上游模型ID
         upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
@@ -333,6 +366,14 @@ class ZAITransformer:
         if is_search:
             mcp_servers.append("deep-web-search")
             debug_log(f"🔍 检测到搜索模型，添加 deep-web-search MCP 服务器")
+        
+        # 构建隐藏的MCP服务器特性列表
+        hidden_mcp_features = [
+            {"type": "mcp", "server": "vibe-coding", "status": "hidden"},
+            {"type": "mcp", "server": "ppt-maker", "status": "hidden"},
+            {"type": "mcp", "server": "image-search", "status": "hidden"},
+            {"type": "mcp", "server": "deep-research", "status": "hidden"}
+        ]
             
         # 构建上游请求体
         chat_id = generate_uuid()
@@ -344,11 +385,11 @@ class ZAITransformer:
             "params": {},
             "features": {
                 "image_generation": False,
-                "web_search": is_search,
-                "auto_web_search": is_search,
-                "preview_mode": False,
+                "web_search": False,  # 注意：通过mcp_servers控制搜索，而不是这个标志
+                "auto_web_search": False,
+                "preview_mode": True,  # 修改为True
                 "flags": [],
-                "features": [],
+                "features": hidden_mcp_features,
                 "enable_thinking": is_thinking,
             },
             "background_tasks": {

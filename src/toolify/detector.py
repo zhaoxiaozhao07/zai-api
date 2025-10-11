@@ -136,28 +136,38 @@ class StreamingFunctionCallDetector:
         return (pos + self.signal_len <= len(self.content_buffer) and 
                 not self.in_think_block)
     
-    def finalize(self) -> Optional[List[Dict[str, Any]]]:
-        """流结束时的最终处理"""
+    def finalize(self) -> tuple[Optional[List[Dict[str, Any]]], str]:
+        """
+        流结束时的最终处理
+        
+        Returns:
+            (parsed_tools, remaining_content): 解析出的工具调用和剩余未输出的内容
+        """
         debug_log(f"[TOOLIFY-DETECTOR] finalize() - 当前状态: {self.state}, 缓冲区长度: {len(self.content_buffer)}")
         
         if self.state == "tool_parsing":
             debug_log(f"[TOOLIFY-DETECTOR] finalize() - 缓冲区内容前500字符: {repr(self.content_buffer[:500])}")
             result = parse_function_calls_xml(self.content_buffer, self.trigger_signal)
             debug_log(f"[TOOLIFY-DETECTOR] finalize() - 解析结果: {result}")
-            return result
+            return result, ""
         
         elif self.state == "signal_detected":
             # 流结束时还在等待<function_calls>标签，说明模型输出了触发信号但没有完整的工具调用
             debug_log(f"[TOOLIFY-DETECTOR] finalize() - 流结束但状态是signal_detected，可能是不完整的工具调用")
             debug_log(f"[TOOLIFY-DETECTOR] finalize() - 缓冲区内容: {repr(self.content_buffer[:300])}")
-            # 尝试解析，如果失败就返回None
+            # 尝试解析，如果失败就把缓冲区内容作为普通文本返回
             result = parse_function_calls_xml(self.content_buffer, self.trigger_signal)
             if result:
                 debug_log(f"[TOOLIFY-DETECTOR] finalize() - 成功解析出工具调用: {result}")
+                return result, ""
             else:
-                debug_log(f"[TOOLIFY-DETECTOR] finalize() - 解析失败，返回None")
-            return result
+                debug_log(f"[TOOLIFY-DETECTOR] finalize() - 解析失败，返回缓冲区内容作为普通文本")
+                return None, self.content_buffer
         
-        debug_log(f"[TOOLIFY-DETECTOR] finalize() - 状态是detecting，无工具调用")
-        return None
+        # detecting状态：没有检测到工具调用，返回缓冲区中剩余的内容
+        if self.content_buffer:
+            debug_log(f"[TOOLIFY-DETECTOR] finalize() - 状态是detecting，返回缓冲区内容: {repr(self.content_buffer[:100])}")
+        else:
+            debug_log(f"[TOOLIFY-DETECTOR] finalize() - 状态是detecting，缓冲区为空")
+        return None, self.content_buffer
 
