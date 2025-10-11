@@ -17,7 +17,7 @@ structlog>=23.2.0
 
 # 性能优化库
 fastuuid>=0.7.0
-orjson>=3.9.0  # 更快的JSON序列化/反序列化
+orjson>=3.9.0
 
 # 时间处理
 python-dateutil>=2.8.0
@@ -28,8 +28,9 @@ furl>=2.1.0
 # 其他工具库
 browserforge>=1.0.0
 python-multipart>=0.0.6
+orjson>=3.11.3
 
 # Toolify 工具调用功能依赖
 # 用于token计数（可选，如果不需要可以注释掉）
-# tiktoken>=0.5.0
+tiktoken>=0.12.0
 
