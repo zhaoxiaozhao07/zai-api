@@ -10,6 +10,8 @@
 - **Z.AI 后端集成**：自动转换并调用 Z.AI API
 - **多模型支持**：支持 GLM-4.5、GLM-4.6、Thinking、Search、Air 等多个模型
 - **流式和非流式**：同时支持流式（SSE）和非流式响应模式
+- **匿名Token支持**：无需Z.AI账号，自动获取临时匿名Token，零配置部署
+- **智能Token降级**：配置Token → 匿名Token → 缓存Token 三级降级策略
 - Claude Code支持：支持通过Claude Code Router接入到CC中
 - Code插件支持：支持Cline、Roo Code、Kilo Code等第三方插件
 
@@ -28,6 +30,7 @@
 - **CORS 支持**：内置跨域支持，方便前端集成
 - **代理配置**：支持 HTTP/HTTPS 代理
 - **Token 认证**：支持 API Key 认证和跳过认证选项
+- **智能Token缓存**：30分钟缓存策略，减少API调用频率
 - **重试机制**：请求失败自动重试
 - **详细日志**：可配置的详细日志输出
 
@@ -50,16 +53,32 @@ cp env_template.txt .env
 ```env
 # Z.AI API 配置
 API_ENDPOINT=https://chat.z.ai/api/chat/completions
-ZAI_TOKEN=your_zai_token
+# ZAI_TOKEN=your_zai_token        # 可选：不配置将自动使用匿名Token
 ZAI_SIGNING_SECRET=junjie
 
 # 服务器配置
 LISTEN_PORT=8080
 AUTH_TOKEN=sk-123456
 
+# 匿名Token配置（推荐保持默认值）
+ENABLE_GUEST_TOKEN=true          # 启用匿名Token功能
+GUEST_TOKEN_CACHE_MINUTES=55     # 缓存55分钟
+
 # 功能开关
 ENABLE_TOOLIFY=true              # 启用工具调用功能
 DEBUG_LOGGING=false              # 生产环境建议关闭
+```
+
+### 零配置部署模式
+
+如果你不想配置任何Token，可以直接使用匿名模式：
+
+```env
+# 最小化配置 - 仅需要这两个基本参数
+LISTEN_PORT=8080
+AUTH_TOKEN=sk-123456
+
+# 其他参数会使用默认值，自动启用匿名Token模式
 ```
 
 #### 2. 启动服务
@@ -162,28 +181,31 @@ response = client.chat.completions.create(
 
 ### 环境变量
 
-| 变量名                    | 说明                  | 默认值                                     |
-| ------------------------- | --------------------- | ------------------------------------------ |
-| `API_ENDPOINT`          | Z.AI API 地址         | `https://chat.z.ai/api/chat/completions` |
-| `ZAI_TOKEN`             | Z.AI 认证 Token       | -                                          |
-| `ZAI_SIGNING_SECRET`    | 签名密钥              | `junjie`                                 |
-| `AUTH_TOKEN`            | API Key（客户端认证） | `sk-your-api-key`                        |
-| `LISTEN_PORT`           | 服务监听端口          | `8080`                                   |
-| `PRIMARY_MODEL`         | 主模型名称            | `GLM-4.5`                                |
-| `THINKING_MODEL`        | 思考模型名称          | `GLM-4.5-Thinking`                       |
-| `SEARCH_MODEL`          | 搜索模型名称          | `GLM-4.5-Search`                         |
-| `AIR_MODEL`             | Air 模型名称          | `GLM-4.5-Air`                            |
-| `GLM_45V_MODEL`         | GLM-4.5V 视觉模型     | `GLM-4.5V`                               |
-| `GLM_46_MODEL`          | GLM-4.6 模型名称      | `GLM-4.6`                                |
-| `GLM_46_THINKING_MODEL` | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
-| `GLM_46_SEARCH_MODEL`   | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
-| `ENABLE_TOOLIFY`        | 启用工具调用功能      | `true`                                   |
-| `TOOLIFY_CUSTOM_PROMPT` | 自定义工具调用提示词  | -                                          |
-| `DEBUG_LOGGING`         | 详细日志输出          | `true`                                   |
-| `SKIP_AUTH_TOKEN`       | 跳过认证（用于测试）  | `false`                                  |
-| `MAX_RETRIES`           | 请求重试次数          | `3`                                      |
-| `HTTP_PROXY`            | HTTP 代理地址         | -                                          |
-| `HTTPS_PROXY`           | HTTPS 代理地址        | -                                          |
+| 变量名                     | 说明                  | 默认值                                     |
+| -------------------------- | --------------------- | ------------------------------------------ |
+| `API_ENDPOINT`           | Z.AI API 地址         | `https://chat.z.ai/api/chat/completions` |
+| `ZAI_TOKEN`              | Z.AI 认证 Token（可选）| -                                          |
+| `ZAI_SIGNING_SECRET`     | 签名密钥              | `junjie`                                 |
+| `AUTH_TOKEN`             | API Key（客户端认证） | `sk-your-api-key`                        |
+| `LISTEN_PORT`            | 服务监听端口          | `8080`                                   |
+| `ENABLE_GUEST_TOKEN`     | 启用匿名Token功能     | `true`                                   |
+| `GUEST_TOKEN_CACHE_MINUTES` | 匿名Token缓存时间（分钟） | `55`                                     |
+| `ZAI_AUTH_ENDPOINT`      | Z.AI认证API端点       | `https://chat.z.ai/api/v1/auths/`        |
+| `PRIMARY_MODEL`          | 主模型名称            | `GLM-4.5`                                |
+| `THINKING_MODEL`         | 思考模型名称          | `GLM-4.5-Thinking`                       |
+| `SEARCH_MODEL`           | 搜索模型名称          | `GLM-4.5-Search`                         |
+| `AIR_MODEL`              | Air 模型名称          | `GLM-4.5-Air`                            |
+| `GLM_45V_MODEL`          | GLM-4.5V 视觉模型     | `GLM-4.5V`                               |
+| `GLM_46_MODEL`           | GLM-4.6 模型名称      | `GLM-4.6`                                |
+| `GLM_46_THINKING_MODEL`  | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
+| `GLM_46_SEARCH_MODEL`    | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
+| `ENABLE_TOOLIFY`         | 启用工具调用功能      | `true`                                   |
+| `TOOLIFY_CUSTOM_PROMPT`  | 自定义工具调用提示词  | -                                          |
+| `DEBUG_LOGGING`          | 详细日志输出          | `true`                                   |
+| `SKIP_AUTH_TOKEN`        | 跳过认证（用于测试）  | `false`                                  |
+| `MAX_RETRIES`            | 请求重试次数          | `3`                                      |
+| `HTTP_PROXY`             | HTTP 代理地址         | -                                          |
+| `HTTPS_PROXY`            | HTTPS 代理地址        | -                                          |
 
 ## API 端点
 
@@ -289,7 +311,7 @@ for chunk in stream:
 
 运行集成测试：
 
-```
+```bash
 # 工具调用集成测试
 python tests/test_toolify_integration.py
 
@@ -310,14 +332,17 @@ python tests/test_non_stream.py
 
 ### 认证失败
 
-1. 确认 `.env` 中的 `ZAI_TOKEN` 配置正确
+1. 确认 `.env` 中的 `ZAI_TOKEN` 配置正确，或启用匿名模式
 2. 检查客户端的 `api_key` 是否与 `AUTH_TOKEN` 一致
+3. 如果使用匿名模式，确认 `ENABLE_GUEST_TOKEN=true`
+
 
 ### 模型不可用
 
 1. 检查 Z.AI API 是否可访问
 2. 确认模型名称配置正确
 3. 查看 Z.AI Token 是否有效
+4. 在匿名模式下，某些高级功能可能受限
 
 ### 查看详细日志
 

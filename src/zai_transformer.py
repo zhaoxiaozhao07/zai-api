@@ -14,6 +14,7 @@ from furl import furl
 from dateutil import tz
 from datetime import datetime
 from browserforge.headers import HeaderGenerator
+from fastapi import HTTPException
 
 from .config import settings, MODEL_MAPPING
 from .helpers import debug_log, perf_timer, perf_track
@@ -251,10 +252,10 @@ class ZAITransformer:
         # 初始化签名生成器
         self.signature_generator = SignatureGenerator()
 
-    def get_token(self) -> str:
+    async def get_token(self) -> str:
         """获取Z.AI认证令牌（从token池获取）"""
         token_pool = get_token_pool()
-        token = token_pool.get_token()
+        token = await token_pool.get_token()
         
         debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token[:20]}...")
         return token
@@ -264,6 +265,26 @@ class ZAITransformer:
         token_pool = get_token_pool()
         token = token_pool.switch_to_next()
         return token
+    
+    def _has_image_content(self, messages: List[Dict]) -> bool:
+        """
+        检测消息中是否包含图像
+        
+        Args:
+            messages: 消息列表
+            
+        Returns:
+            bool: 如果消息中包含图像内容则返回True
+        """
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if (part.get("type") == "image_url" and
+                            part.get("image_url", {}).get("url")):
+                            return True
+        return False
     
     def _process_messages(self, messages: list, is_vision_model: bool = False) -> Tuple[list, list]:
         """
@@ -358,7 +379,18 @@ class ZAITransformer:
         debug_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
         # 获取认证令牌
-        token = self.get_token()
+        token = await self.get_token()
+        
+        # 检查匿名Token是否尝试使用视觉模型
+        token_pool = get_token_pool()
+        messages = request.get("messages", [])
+        
+        if token_pool.is_anonymous_token(token) and self._has_image_content(messages):
+            debug_log("[ERROR] 匿名Token尝试使用视觉功能被拒绝")
+            raise HTTPException(
+                status_code=400,
+                detail="匿名Token不支持图像识别功能，请配置ZAI_TOKEN使用视觉模型。设置环境变量ZAI_TOKEN=your_token后重启服务。"
+            )
 
         # 确定请求的模型特性
         requested_model = request.get("model", settings.PRIMARY_MODEL)
