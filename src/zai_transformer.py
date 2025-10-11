@@ -8,6 +8,7 @@ ZAI格式转换器
 import time
 import random
 from typing import Dict, Any
+from functools import lru_cache
 from fastuuid import uuid4
 from furl import furl
 from dateutil import tz
@@ -15,13 +16,56 @@ from datetime import datetime
 from browserforge.headers import HeaderGenerator
 
 from .config import settings, MODEL_MAPPING
-from .helpers import debug_log
+from .helpers import debug_log, perf_timer, perf_track
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
 
 
 # 全局 HeaderGenerator 实例（单例模式）
 _header_generator_instance = None
+
+# 缓存的时区对象（避免重复查找）
+_cached_timezone = None
+
+
+@lru_cache(maxsize=8)
+def get_timezone(tz_name: str = "Asia/Shanghai"):
+    """
+    获取时区对象（带缓存）
+    
+    Args:
+        tz_name: 时区名称，默认 Asia/Shanghai
+        
+    Returns:
+        时区对象
+    """
+    return tz.gettz(tz_name)
+
+
+def generate_time_variables(timezone_name: str = "Asia/Shanghai") -> Dict[str, str]:
+    """
+    一次性生成所有时间相关变量（性能优化）
+    
+    Args:
+        timezone_name: 时区名称
+        
+    Returns:
+        包含所有时间变量的字典
+    """
+    # 获取缓存的时区对象
+    timezone = get_timezone(timezone_name)
+    
+    # 一次调用 datetime.now()，避免多次调用
+    now = datetime.now(tz=timezone)
+    
+    return {
+        "{{CURRENT_DATETIME}}": now.strftime("%Y-%m-%d %H:%M:%S"),
+        "{{CURRENT_DATE}}": now.strftime("%Y-%m-%d"),
+        "{{CURRENT_TIME}}": now.strftime("%H:%M:%S"),
+        "{{CURRENT_WEEKDAY}}": now.strftime("%A"),
+        "{{CURRENT_TIMEZONE}}": timezone_name,
+        "{{USER_LANGUAGE}}": "zh-CN",
+    }
 
 
 def get_header_generator_instance() -> HeaderGenerator:
@@ -44,62 +88,83 @@ def generate_uuid() -> str:
     return str(uuid4())
 
 
+# Header模板缓存（减少BrowserForge调用）
+_header_template_cache = None
+_header_cache_lock = False
+
+
+def get_header_template() -> Dict[str, str]:
+    """
+    获取缓存的header模板（仅在首次调用时生成）
+    
+    Returns:
+        header模板字典
+    """
+    global _header_template_cache, _header_cache_lock
+    
+    # 简单的单例模式（无需线程锁，因为是单进程应用）
+    if _header_template_cache is None and not _header_cache_lock:
+        _header_cache_lock = True
+        header_gen = get_header_generator_instance()
+        
+        # 使用BrowserForge生成基础headers（仅一次）
+        base_headers = header_gen.generate()
+        
+        # 设置特定于Z.AI的headers
+        base_headers["Origin"] = "https://chat.z.ai"
+        base_headers["Content-Type"] = "application/json"
+        base_headers["X-Fe-Version"] = "prod-fe-1.0.95"
+        
+        # 设置Fetch相关headers（用于CORS请求）
+        base_headers["Sec-Fetch-Dest"] = "empty"
+        base_headers["Sec-Fetch-Mode"] = "cors"
+        base_headers["Sec-Fetch-Site"] = "same-origin"
+        
+        # 确保Accept-Encoding包含zstd（现代浏览器支持）
+        if "Accept-Encoding" in base_headers:
+            if "zstd" not in base_headers["Accept-Encoding"]:
+                base_headers["Accept-Encoding"] = base_headers["Accept-Encoding"] + ", zstd"
+        else:
+            base_headers["Accept-Encoding"] = "gzip, deflate, br, zstd"
+        
+        # 确保Accept头适合API请求
+        base_headers["Accept"] = "*/*"
+        
+        # 保持连接
+        base_headers["Connection"] = "keep-alive"
+        
+        _header_template_cache = base_headers
+        debug_log("✅ Header模板已缓存", 
+                  user_agent=base_headers.get("User-Agent", "")[:50],
+                  has_sec_ch_ua=("sec-ch-ua" in base_headers or "Sec-Ch-Ua" in base_headers))
+    
+    return _header_template_cache.copy()
+
+
 def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
-    """使用BrowserForge生成动态、真实的浏览器headers
+    """使用缓存的header模板生成headers（性能优化）
     
     Args:
         chat_id: 对话ID，用于生成Referer
-        user_agent: 可选的指定User-Agent，如果提供则基于此生成headers
+        user_agent: 可选的指定User-Agent（保留接口兼容性，但不推荐使用）
         
     Returns:
         完整的HTTP headers字典
     """
-    header_gen = get_header_generator_instance()
+    # 使用缓存的模板（避免每次调用BrowserForge）
+    headers = get_header_template()
     
-    # 使用BrowserForge生成基础headers
-    # 如果提供了user_agent，则基于它生成；否则让BrowserForge自动选择
-    if user_agent:
-        base_headers = header_gen.generate(user_agent=user_agent)
-    else:
-        base_headers = header_gen.generate()
-    
-    # BrowserForge生成的headers已经包含了大部分真实的浏览器headers
-    # 现在我们需要覆盖或添加Z.AI特定的headers
-    
-    # 设置Referer
+    # 仅更新需要变化的字段
     if chat_id:
-        base_headers["Referer"] = f"https://chat.z.ai/c/{chat_id}"
+        headers["Referer"] = f"https://chat.z.ai/c/{chat_id}"
     else:
-        base_headers["Referer"] = "https://chat.z.ai/"
+        headers["Referer"] = "https://chat.z.ai/"
     
-    # 设置特定于Z.AI的headers
-    base_headers["Origin"] = "https://chat.z.ai"
-    base_headers["Content-Type"] = "application/json"
-    base_headers["X-Fe-Version"] = "prod-fe-1.0.95"
+    # 如果指定了user_agent，覆盖模板中的User-Agent
+    if user_agent:
+        headers["User-Agent"] = user_agent
     
-    # 设置Fetch相关headers（用于CORS请求）
-    base_headers["Sec-Fetch-Dest"] = "empty"
-    base_headers["Sec-Fetch-Mode"] = "cors"
-    base_headers["Sec-Fetch-Site"] = "same-origin"
-    
-    # 确保Accept-Encoding包含zstd（现代浏览器支持）
-    if "Accept-Encoding" in base_headers:
-        if "zstd" not in base_headers["Accept-Encoding"]:
-            base_headers["Accept-Encoding"] = base_headers["Accept-Encoding"] + ", zstd"
-    else:
-        base_headers["Accept-Encoding"] = "gzip, deflate, br, zstd"
-    
-    # 确保Accept头适合API请求
-    base_headers["Accept"] = "*/*"
-    
-    # 保持连接
-    base_headers["Connection"] = "keep-alive"
-    
-    debug_log("BrowserForge生成headers", 
-              user_agent=base_headers.get("User-Agent", "")[:50],
-              has_sec_ch_ua=("sec-ch-ua" in base_headers or "Sec-Ch-Ua" in base_headers))
-    
-    return base_headers
+    return headers
 
 
 def build_query_params(
@@ -239,6 +304,7 @@ class ZAITransformer:
                 break
         return user_content
 
+    @perf_track("transform_request_in", log_result=True, threshold_ms=10)
     async def transform_request_in(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """转换OpenAI请求为z.ai格式"""
         debug_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
@@ -259,7 +325,8 @@ class ZAITransformer:
 
         # 处理消息列表
         debug_log(f"  开始处理 {len(request.get('messages', []))} 条消息")
-        messages = self._process_messages(request.get("messages", []))
+        with perf_timer("process_messages", threshold_ms=5):
+            messages = self._process_messages(request.get("messages", []))
 
         # 构建MCP服务器列表
         mcp_servers = []
@@ -292,13 +359,8 @@ class ZAITransformer:
             "variables": {
                 "{{USER_NAME}}": "Guest",
                 "{{USER_LOCATION}}": "Unknown",
-                # 使用dateutil提供更精确的时区处理
-                "{{CURRENT_DATETIME}}": datetime.now(tz=tz.gettz("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S"),
-                "{{CURRENT_DATE}}": datetime.now(tz=tz.gettz("Asia/Shanghai")).strftime("%Y-%m-%d"),
-                "{{CURRENT_TIME}}": datetime.now(tz=tz.gettz("Asia/Shanghai")).strftime("%H:%M:%S"),
-                "{{CURRENT_WEEKDAY}}": datetime.now(tz=tz.gettz("Asia/Shanghai")).strftime("%A"),
-                "{{CURRENT_TIMEZONE}}": "Asia/Shanghai",
-                "{{USER_LANGUAGE}}": "zh-CN",
+                # 使用优化后的时间变量生成函数（一次调用，避免重复）
+                **generate_time_variables("Asia/Shanghai"),
             },
             "model_item": {
                 "id": upstream_model_id,
@@ -313,8 +375,9 @@ class ZAITransformer:
         timestamp = int(time.time() * 1000)
         request_id = generate_uuid()
         
-        # 使用BrowserForge生成动态headers（不指定user_agent让其自动选择更真实的配置）
-        dynamic_headers = get_dynamic_headers(chat_id)
+        # 使用缓存的header模板生成headers（性能优化）
+        with perf_timer("generate_headers", threshold_ms=5):
+            dynamic_headers = get_dynamic_headers(chat_id)
         
         # 从生成的headers中提取User-Agent
         user_agent = dynamic_headers.get("User-Agent", "")
@@ -333,11 +396,13 @@ class ZAITransformer:
         # 生成Z.AI签名
         try:
             # 提取最后一条用户消息内容
-            user_content = self._extract_last_user_content(messages)
+            with perf_timer("extract_user_content", threshold_ms=5):
+                user_content = self._extract_last_user_content(messages)
             
             # 使用SignatureGenerator生成签名
-            signature_result = self.signature_generator.generate(token, request_id, timestamp, user_content)
-            signature = signature_result["signature"]
+            with perf_timer("generate_signature", threshold_ms=10):
+                signature_result = self.signature_generator.generate(token, request_id, timestamp, user_content)
+                signature = signature_result["signature"]
             
             # 添加签名到headers
             dynamic_headers["X-Signature"] = signature
@@ -354,7 +419,7 @@ class ZAITransformer:
             **dynamic_headers,
             "Authorization": f"Bearer {token}",
             "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
+            # "Pragma": "no-cache",
         }
 
         config = {

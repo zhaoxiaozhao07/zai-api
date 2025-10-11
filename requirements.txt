@@ -17,6 +17,7 @@ structlog>=23.2.0
 
 # 性能优化库
 fastuuid>=0.7.0
+orjson>=3.9.0  # 更快的JSON序列化/反序列化
 
 # 时间处理
 python-dateutil>=2.8.0

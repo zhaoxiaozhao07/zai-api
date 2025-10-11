@@ -12,11 +12,33 @@ import httpx
 
 from .config import settings
 from .schemas import OpenAIRequest, ModelsResponse, Model
-from .helpers import debug_log, get_logger
+from .helpers import debug_log, get_logger, perf_timer
 from .zai_transformer import ZAITransformer
 from .toolify_handler import should_enable_toolify, prepare_toolify_request, parse_toolify_response
 from .toolify.detector import StreamingFunctionCallDetector
 from .toolify_config import get_toolify
+
+# 尝试导入orjson（性能优化），如果不可用则fallback到标准json
+try:
+    import orjson
+    
+    # 创建orjson兼容层
+    class JSONEncoder:
+        @staticmethod
+        def dumps(obj, **kwargs):
+            # orjson.dumps返回bytes，需要decode
+            return orjson.dumps(obj).decode('utf-8')
+        
+        @staticmethod
+        def loads(s, **kwargs):
+            # orjson.loads可以接受str或bytes
+            return orjson.loads(s)
+    
+    json_lib = JSONEncoder()
+    debug_log("✅ 使用 orjson 进行 JSON 序列化/反序列化（性能优化）")
+except ImportError:
+    json_lib = json
+    debug_log("⚠️ orjson 未安装，使用标准 json 库")
 
 router = APIRouter()
 
@@ -244,18 +266,22 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     # 获取全局HTTP客户端（复用连接池）
                     client = await get_http_client()
                     
-                    # 发起流式请求
+                    # 发起流式请求（带性能追踪）
                     # 注意：移除手动设置的Accept-Encoding，让httpx自动管理压缩/解压
                     # 这样httpx会根据已安装的解压库（brotli, zstandard）自动处理
                     headers = transformed["config"]["headers"].copy()
                     headers.pop("Accept-Encoding", None)
                     
+                    request_start_time = time.perf_counter()
                     async with client.stream(
                         "POST",
                         transformed["config"]["url"],
                         json=transformed["body"],
                         headers=headers,
                     ) as response:
+                        # 记录首字节时间（TTFB）
+                        ttfb = (time.perf_counter() - request_start_time) * 1000
+                        debug_log(f"⏱️ 上游TTFB (首字节时间)", ttfb_ms=f"{ttfb:.2f}ms")
                         # 检查响应状态码
                         if response.status_code != 200:
                             error_text = await response.aread()
@@ -292,7 +318,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     "details": error_msg[:500]
                                 }
                             }
-                            yield f"data: {json.dumps(error_response)}\n\n"
+                            yield f"data: {json_lib.dumps(error_response)}\n\n"
                             yield "data: [DONE]\n\n"
                             return
 
@@ -355,7 +381,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                         continue
 
                                     try:
-                                        chunk_data = json.loads(chunk_str)
+                                        chunk_data = json_lib.loads(chunk_str)
                                         debug_log(f"[SSE-JSON] 解析成功，type: {chunk_data.get('type')}")
 
                                         if chunk_data.get("type") == "chat:completion":
@@ -395,7 +421,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                     "object": "chat.completion.chunk",
                                                                     "system_fingerprint": "fp_zai_001",
                                                                 }
-                                                                yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
                                                             
                                                             content_chunk = {
                                                                 "choices": [{
@@ -410,7 +436,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                 "object": "chat.completion.chunk",
                                                                 "system_fingerprint": "fp_zai_001",
                                                             }
-                                                            yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                            yield f"data: {json_lib.dumps(content_chunk)}\n\n"
                                                         debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
                                                         continue
                                                     
@@ -432,7 +458,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         "object": "chat.completion.chunk",
                                                         "system_fingerprint": "fp_zai_001",
                                                     }
-                                                    yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                    yield f"data: {json_lib.dumps(role_chunk)}\n\n"
 
                                                 if delta_content:
                                                     if delta_content.startswith("<details"):
@@ -468,7 +494,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     }
                                                     yielded_chunks_count += 1
                                                     debug_log(f"[YIELD] thinking chunk #{yielded_chunks_count}, content长度: {len(formatted_content)}")
-                                                    yield f"data: {json.dumps(thinking_chunk)}\n\n"
+                                                    yield f"data: {json_lib.dumps(thinking_chunk)}\n\n"
 
                                             # 处理答案内容
                                             elif phase == "answer":
@@ -503,7 +529,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                     "object": "chat.completion.chunk",
                                                                     "system_fingerprint": "fp_zai_001",
                                                                 }
-                                                                yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
                                                             
                                                             content_chunk = {
                                                                 "choices": [{
@@ -518,7 +544,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                 "object": "chat.completion.chunk",
                                                                 "system_fingerprint": "fp_zai_001",
                                                             }
-                                                            yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                            yield f"data: {json_lib.dumps(content_chunk)}\n\n"
                                                         debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
                                                         continue
                                                     
@@ -540,7 +566,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         "object": "chat.completion.chunk",
                                                         "system_fingerprint": "fp_zai_001",
                                                     }
-                                                    yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                    yield f"data: {json_lib.dumps(role_chunk)}\n\n"
 
                                                 # 处理思考结束和答案开始
                                                 if edit_content and "</details>\n" in edit_content:
@@ -561,7 +587,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                             "object": "chat.completion.chunk",
                                                             "system_fingerprint": "fp_zai_001",
                                                         }
-                                                        yield f"data: {json.dumps(sig_chunk)}\n\n"
+                                                        yield f"data: {json_lib.dumps(sig_chunk)}\n\n"
 
                                                     content_after = edit_content.split("</details>\n")[-1]
                                                     if content_after:
@@ -581,7 +607,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                             "object": "chat.completion.chunk",
                                                             "system_fingerprint": "fp_zai_001",
                                                         }
-                                                        yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                        yield f"data: {json_lib.dumps(content_chunk)}\n\n"
 
                                                 elif delta_content:
                                                     if not has_thinking:
@@ -599,7 +625,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                             "object": "chat.completion.chunk",
                                                             "system_fingerprint": "fp_zai_001",
                                                         }
-                                                        yield f"data: {json.dumps(role_chunk)}\n\n"
+                                                        yield f"data: {json_lib.dumps(role_chunk)}\n\n"
 
                                                     content_chunk = {
                                                         "choices": [{
@@ -616,7 +642,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     }
                                                     yielded_chunks_count += 1
                                                     debug_log(f"[YIELD] answer chunk #{yielded_chunks_count}, content长度: {len(delta_content)}")
-                                                    yield f"data: {json.dumps(content_chunk)}\n\n"
+                                                    yield f"data: {json_lib.dumps(content_chunk)}\n\n"
 
                                             # 处理完成
                                             if data.get("usage"):
@@ -653,7 +679,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     "object": "chat.completion.chunk",
                                                     "system_fingerprint": "fp_zai_001",
                                                 }
-                                                yield f"data: {json.dumps(finish_chunk)}\n\n"
+                                                yield f"data: {json_lib.dumps(finish_chunk)}\n\n"
                                                 yield "data: [DONE]\n\n"
                                                 return
 
@@ -702,7 +728,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                 "type": "stream_error"
                             }
                         }
-                        yield f"data: {json.dumps(error_response)}\n\n"
+                        yield f"data: {json_lib.dumps(error_response)}\n\n"
                         yield "data: [DONE]\n\n"
                         return
 
@@ -793,17 +819,21 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             # 获取全局HTTP客户端
             client = await get_http_client()
             
-            # 发起流式请求（上游始终返回SSE流）
+            # 发起流式请求（上游始终返回SSE流，带性能追踪）
             # 注意：移除手动设置的Accept-Encoding，让httpx自动管理压缩/解压
             headers = transformed["config"]["headers"].copy()
             headers.pop("Accept-Encoding", None)
             
+            request_start_time = time.perf_counter()
             async with client.stream(
                 "POST",
                 transformed["config"]["url"],
                 json=transformed["body"],
                 headers=headers,
             ) as response:
+                # 记录非流式请求的TTFB
+                ttfb = (time.perf_counter() - request_start_time) * 1000
+                debug_log(f"⏱️ 非流式上游TTFB", ttfb_ms=f"{ttfb:.2f}ms")
                 # 检查响应状态码
                 if response.status_code != 200:
                     error_text = await response.aread()
@@ -855,7 +885,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                     if not line.startswith("data:"):
                         # 尝试解析为错误 JSON
                         try:
-                            maybe_err = json.loads(line)
+                            maybe_err = json_lib.loads(line)
                             if isinstance(maybe_err, dict) and (
                                 "error" in maybe_err or "code" in maybe_err or "message" in maybe_err
                             ):
@@ -875,7 +905,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                     
                     # 解析 SSE 数据块
                     try:
-                        chunk = json.loads(data_str)
+                        chunk = json_lib.loads(data_str)
                     except json.JSONDecodeError:
                         continue
                     

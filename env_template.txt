@@ -13,6 +13,12 @@ AUTH_TOKEN=sk-123456
 # 系统会自动合并去重，并在请求失败时切换token
 ZAI_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijc0MzIzNzQ3LTVhMTAtNDQ3My05ZjhmLTk5YjI2OWUwZDA0ZCIsImVtYWlsIjoib3FjZ3lrNWFodUBkdWNrbWFpbC5zYnMifQ.SJSZxgX4saVleREBpWdV1JIRxd_tJ_6cv3EflJFy8KXTSBSzYXmfVz9RZF5cF78aI3TY54eAONEjYuGbmYNYZQ
 
+# 服务器配置
+LISTEN_PORT=8080
+DEBUG_LOGGING=false
+
+# ！以下内容不优化代码，不要修改！
+
 # Z.AI 签名密钥（用于API请求签名，默认值：junjie），请勿修改
 ZAI_SIGNING_SECRET=junjie
 
@@ -24,10 +30,6 @@ AIR_MODEL=GLM-4.5-Air
 GLM_46_MODEL=GLM-4.6
 GLM_46_THINKING_MODEL=GLM-4.6-Thinking
 
-# 服务器配置
-LISTEN_PORT=8080
-DEBUG_LOGGING=false
-
 # 跳过客户端认证（仅开发环境使用）
 SKIP_AUTH_TOKEN=false
 
@@ -37,8 +39,8 @@ MAX_RETRIES=3
 # 代理配置（可选）
 # 如果需要使用代理，取消注释并设置代理地址
 # 如果不需要代理，保持注释状态或留空
-# HTTP_PROXY=http://127.0.0.1:7890
-# HTTPS_PROXY=http://127.0.0.1:7890
+HTTP_PROXY=
+HTTPS_PROXY=
 
 # ========================================
 # Toolify 工具调用功能配置

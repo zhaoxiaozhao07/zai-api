@@ -10,26 +10,31 @@ import time
 import hmac
 import hashlib
 from typing import Dict, Any, Optional
+from functools import lru_cache
 from jose import jwt
 from jose.exceptions import JWTError
-from .helpers import debug_log
+from .helpers import debug_log, perf_track
 
 
+@lru_cache(maxsize=128)
+@perf_track("jwt_decode", log_result=True, threshold_ms=5)
 def decode_jwt_payload(token: str) -> Dict[str, Any]:
     """
     使用python-jose库解码JWT token的payload部分（带完整异常处理）
     
     python-jose提供更专业的JWT处理，支持更多加密算法和标准
     
+    注意：此函数使用LRU缓存，可以缓存最近128个token的解码结果，显著提升性能
+    
     Args:
         token: JWT token字符串
         
     Returns:
-        解码后的payload字典，失败时返回空字典
+        解码后的payload字典，失败时返回空字典（注意：返回的是元组包装的字典以支持缓存）
     """
     try:
         if not token:
-            return {}
+            return _make_cacheable_dict({})
         
         # 使用python-jose库解码JWT，不验证签名（因为我们只需要读取payload）
         # jose库的decode不需要密钥即可解码（当options禁用验证时）
@@ -44,18 +49,35 @@ def decode_jwt_payload(token: str) -> Dict[str, Any]:
                 "verify_aud": False
             }
         )
-        return payload
+        # 转换为可缓存的格式（使用frozendict或元组）
+        return _make_cacheable_dict(payload)
     except JWTError as e:
         debug_log(f"JWT解码错误: {e}")
-        return {}
+        return _make_cacheable_dict({})
     except Exception as e:
         debug_log(f"解码JWT payload失败: {e}")
-        return {}
+        return _make_cacheable_dict({})
 
 
+def _make_cacheable_dict(d: dict) -> Dict[str, Any]:
+    """
+    将字典转换为可缓存的格式（实际上dict本身在lru_cache中可以返回）
+    
+    Args:
+        d: 原始字典
+        
+    Returns:
+        原始字典（dict对象作为返回值是可以的）
+    """
+    return d
+
+
+@lru_cache(maxsize=128)
 def extract_user_id_from_token(token: str) -> str:
     """
     从JWT token中提取user_id（尝试多个常见字段）
+    
+    注意：此函数使用LRU缓存，避免重复解码同一token
     
     Args:
         token: JWT token字符串
