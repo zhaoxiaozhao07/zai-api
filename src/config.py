@@ -47,9 +47,21 @@ class Settings(BaseSettings):
     # Request Configuration
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
     
-    # Proxy Configuration
-    HTTP_PROXY: Optional[str] = os.getenv("HTTP_PROXY")
-    HTTPS_PROXY: Optional[str] = os.getenv("HTTPS_PROXY")
+    # Proxy Configuration - 代理配置（支持多个代理）
+    # 解析逗号分隔的代理列表
+    _http_proxy_raw = os.getenv("HTTP_PROXY", "")
+    _https_proxy_raw = os.getenv("HTTPS_PROXY", "")
+    
+    # 将逗号分隔的字符串转换为列表（去除空值）
+    HTTP_PROXY_LIST: list = [p.strip() for p in _http_proxy_raw.split(",") if p.strip()] if _http_proxy_raw else []
+    HTTPS_PROXY_LIST: list = [p.strip() for p in _https_proxy_raw.split(",") if p.strip()] if _https_proxy_raw else []
+    
+    # 保留单代理配置的兼容性
+    HTTP_PROXY: Optional[str] = HTTP_PROXY_LIST[0] if HTTP_PROXY_LIST else None
+    HTTPS_PROXY: Optional[str] = HTTPS_PROXY_LIST[0] if HTTPS_PROXY_LIST else None
+    
+    # 代理策略：failover（失败切换）或 round-robin（轮询）
+    PROXY_STRATEGY: str = os.getenv("PROXY_STRATEGY", "failover").lower()
     
     # Toolify Configuration - 工具调用功能配置
     ENABLE_TOOLIFY: bool = os.getenv("ENABLE_TOOLIFY", "true").lower() == "true"

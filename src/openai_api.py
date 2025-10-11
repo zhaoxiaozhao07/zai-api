@@ -52,17 +52,91 @@ transformer = ZAITransformer()
 _http_client = None
 _client_lock = asyncio.Lock()
 
+# 代理池管理
+_proxy_list = []  # 代理列表
+_proxy_index = 0  # 当前代理索引
+_proxy_lock = asyncio.Lock()  # 代理切换锁
+_proxy_failures = {}  # 记录每个代理的失败次数
+
+
+def init_proxy_pool():
+    """初始化代理池"""
+    global _proxy_list
+    
+    # 优先使用 HTTPS_PROXY_LIST，如果没有则使用 HTTP_PROXY_LIST
+    _proxy_list = settings.HTTPS_PROXY_LIST or settings.HTTP_PROXY_LIST
+    
+    if _proxy_list:
+        debug_log(f"[PROXY] 初始化代理池，共 {len(_proxy_list)} 个代理，策略: {settings.PROXY_STRATEGY}")
+        for i, proxy in enumerate(_proxy_list):
+            debug_log(f"  代理 {i+1}: {proxy}")
+
+
+def get_next_proxy() -> Optional[str]:
+    """
+    获取下一个代理（根据策略）
+    
+    Returns:
+        Optional[str]: 代理地址，如果没有可用代理则返回 None
+    """
+    global _proxy_index
+    
+    if not _proxy_list:
+        return None
+    
+    if settings.PROXY_STRATEGY == "round-robin":
+        # 轮询策略：每次调用都切换到下一个代理
+        proxy = _proxy_list[_proxy_index]
+        _proxy_index = (_proxy_index + 1) % len(_proxy_list)
+        debug_log(f"[PROXY] Round-robin选择代理 {_proxy_index}: {proxy}")
+        return proxy
+    else:
+        # failover 策略：始终使用当前索引的代理
+        proxy = _proxy_list[_proxy_index]
+        debug_log(f"[PROXY] Failover使用代理 {_proxy_index}: {proxy}")
+        return proxy
+
+
+async def switch_proxy_on_failure():
+    """
+    失败时切换代理（仅 failover 策略需要）
+    """
+    global _proxy_index, _http_client
+    
+    if not _proxy_list or settings.PROXY_STRATEGY != "failover":
+        return
+    
+    async with _proxy_lock:
+        old_index = _proxy_index
+        _proxy_index = (_proxy_index + 1) % len(_proxy_list)
+        debug_log(f"[PROXY] 代理失败，从 {old_index} 切换到 {_proxy_index}: {_proxy_list[_proxy_index]}")
+        
+        # 关闭旧的客户端，强制下次重建
+        if _http_client:
+            await _http_client.aclose()
+            _http_client = None
+
+
+# 初始化代理池
+init_proxy_pool()
+
 
 async def get_http_client() -> httpx.AsyncClient:
     """
-    获取或创建全局httpx客户端（单例模式，支持连接池复用）
+    获取或创建全局httpx客户端（单例模式，支持连接池复用和代理池）
     使用asyncio特性进行并发控制
     """
     global _http_client
     
     async with _client_lock:
-        if _http_client is None or _http_client.is_closed:
-            proxy = settings.HTTPS_PROXY or settings.HTTP_PROXY
+        # Round-robin策略下，每次都需要重新创建客户端以使用新代理
+        should_recreate = (_http_client is None or
+                          _http_client.is_closed or
+                          (settings.PROXY_STRATEGY == "round-robin" and _proxy_list))
+        
+        if should_recreate:
+            # 获取代理
+            proxy = get_next_proxy()
             
             # 配置连接池和超时
             limits = httpx.Limits(
@@ -77,6 +151,11 @@ async def get_http_client() -> httpx.AsyncClient:
                 write=10.0,    # 写入超时
                 pool=5.0       # 连接池超时
             )
+            
+            # 如果有旧客户端，先关闭
+            if _http_client and not _http_client.is_closed:
+                await _http_client.aclose()
+            
             if proxy:
                 debug_log("使用代理创建HTTP客户端", proxy=proxy)
                 _http_client = httpx.AsyncClient(
@@ -94,7 +173,6 @@ async def get_http_client() -> httpx.AsyncClient:
                     http2=True,  # 启用HTTP/2支持
                     follow_redirects=True
                 )
-
         
         return _http_client
 
@@ -310,6 +388,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     # 使用新token重新生成请求
                                     transformed = await transformer.transform_request_in(request_dict, client=client)
                                     debug_log(f"[OK] 已切换token并重新生成请求")
+                                
+                                # 网络错误时尝试切换代理（仅限 failover 策略）
+                                if response.status_code in [502, 503, 504] and _proxy_list:
+                                    await switch_proxy_on_failure()
                                 
                                 continue
                             
@@ -858,6 +940,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     debug_log("流处理错误", error=str(e))
                     retry_count += 1
                     last_error = str(e)
+                    
+                    # 网络连接错误时尝试切换代理（仅限 failover 策略）
+                    if _proxy_list and "connect" in str(e).lower():
+                        await switch_proxy_on_failure()
 
                     if retry_count > settings.MAX_RETRIES:
                         error_response = {
@@ -996,6 +1082,10 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             request_dict = request.model_dump()
                             transformed = await transformer.transform_request_in(request_dict, client=client)
                             debug_log(f"[OK] 已切换token并重新生成请求")
+                        
+                        # 网络错误时尝试切换代理（仅限 failover 策略）
+                        if response.status_code in [502, 503, 504] and _proxy_list:
+                            await switch_proxy_on_failure()
                         
                         continue
                     
@@ -1169,6 +1259,10 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             debug_log("非流式处理错误", error=str(e))
             retry_count += 1
             last_error = str(e)
+            
+            # 网络连接错误时尝试切换代理（仅限 failover 策略）
+            if _proxy_list and "connect" in str(e).lower():
+                await switch_proxy_on_failure()
             
             if retry_count > settings.MAX_RETRIES:
                 raise HTTPException(
