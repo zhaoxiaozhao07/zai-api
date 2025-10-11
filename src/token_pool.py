@@ -6,11 +6,10 @@ Token池管理模块 - 支持配置Token和匿名Token的智能降级
 """
 
 import os
-import random
 import asyncio
 import httpx
 import threading
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timedelta
 from .helpers import debug_log
@@ -87,6 +86,12 @@ class TokenPool:
         self._anonymous_token_expires_at: Optional[datetime] = None
         self._fetch_lock = asyncio.Lock()
         
+        # HTTP连接池优化 - 持久化HTTP客户端
+        self._http_client: Optional[httpx.AsyncClient] = None
+        
+        # Token轮询锁 - 防止并发切换导致的竞态条件
+        self._switch_lock = threading.Lock()
+        
         self._load_tokens()
     
     def _load_tokens(self):
@@ -132,9 +137,31 @@ class TokenPool:
             self.anonymous_mode = True
             debug_log("[INFO] Token池为空，启用纯匿名Token模式")
     
+    async def _get_http_client(self) -> httpx.AsyncClient:
+        """
+        获取或创建HTTP客户端（连接池复用）
+        使用持久化连接池，显著减少网络延迟
+        
+        Returns:
+            httpx.AsyncClient: 持久化的HTTP客户端
+        """
+        if self._http_client is None:
+            debug_log("[HTTP] 创建新的HTTP客户端连接池")
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(10.0),
+                limits=httpx.Limits(
+                    max_keepalive_connections=10,  # 保持的连接数
+                    max_connections=20,             # 最大连接数
+                    keepalive_expiry=30            # 连接保持时间
+                ),
+                http2=True  # 启用HTTP/2多路复用，进一步提升并发性能
+            )
+        return self._http_client
+    
     async def _fetch_anonymous_token(self) -> Optional[str]:
         """
         获取匿名Token（带简单重试机制）
+        使用持久化HTTP连接池，减少连接开销
         
         Returns:
             Optional[str]: 匿名Token，失败返回None
@@ -150,22 +177,23 @@ class TokenPool:
             try:
                 headers = get_zai_dynamic_headers()
                 
-                async with httpx.AsyncClient(timeout=10.0) as client:
-                    response = await client.get(
-                        settings.ZAI_AUTH_ENDPOINT,
-                        headers=headers
-                    )
+                # 使用持久化的HTTP客户端，避免重复创建连接
+                client = await self._get_http_client()
+                response = await client.get(
+                    settings.ZAI_AUTH_ENDPOINT,
+                    headers=headers
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    token = data.get("token", "")
+                    if token:
+                        debug_log(f"[OK] 成功获取匿名Token: {token[:20]}...")
+                        return token
+                else:
+                    last_status_code = response.status_code
+                    debug_log(f"[WARN] 获取匿名Token失败，状态码: {response.status_code}")
                     
-                    if response.status_code == 200:
-                        data = response.json()
-                        token = data.get("token", "")
-                        if token:
-                            debug_log(f"[OK] 成功获取匿名Token: {token[:20]}...")
-                            return token
-                    else:
-                        last_status_code = response.status_code
-                        debug_log(f"[WARN] 获取匿名Token失败，状态码: {response.status_code}")
-                        
             except Exception as e:
                 debug_log(f"[ERROR] 获取匿名Token异常 (尝试 {attempt + 1}/{max_retries}): {e}")
             
@@ -267,20 +295,22 @@ class TokenPool:
     def switch_to_next(self) -> str:
         """
         切换到下一个配置Token（轮询）
+        使用线程锁确保并发安全，防止竞态条件
         
         Returns:
             str: 下一个Token
         """
-        if len(self.tokens) <= 1:
-            debug_log("[WARN] 只有一个token，无法切换")
-            return self.current_token if self.current_token else ""
-        
-        # 切换到下一个token
-        self.current_index = (self.current_index + 1) % len(self.tokens)
-        self.current_token = self.tokens[self.current_index]
-        
-        debug_log(f"[SWITCH] 切换到下一个token (索引: {self.current_index}/{len(self.tokens)}): {self.current_token[:20]}...")
-        return self.current_token
+        with self._switch_lock:  # 使用锁保护，确保原子操作
+            if len(self.tokens) <= 1:
+                debug_log("[WARN] 只有一个token，无法切换")
+                return self.current_token if self.current_token else ""
+            
+            # 原子操作：切换到下一个token
+            self.current_index = (self.current_index + 1) % len(self.tokens)
+            self.current_token = self.tokens[self.current_index]
+            
+            debug_log(f"[SWITCH] 切换到下一个token (索引: {self.current_index}/{len(self.tokens)}): {self.current_token[:20]}...")
+            return self.current_token
     
     async def switch_to_anonymous(self) -> Optional[str]:
         """
@@ -300,7 +330,7 @@ class TokenPool:
         """检查是否处于匿名模式"""
         return self.anonymous_mode
     
-    def get_status(self) -> Dict[str, any]:
+    def get_status(self) -> Dict[str, Any]:
         """
         获取Token池状态信息
         
@@ -331,7 +361,18 @@ class TokenPool:
     def reload(self):
         """重新加载token池"""
         debug_log("[RELOAD] 重新加载token池")
-        self._load_tokens()
+        with self._switch_lock:  # 重新加载时也需要加锁
+            self._load_tokens()
+    
+    async def close(self):
+        """
+        清理资源，关闭HTTP连接池
+        建议在应用关闭时调用此方法
+        """
+        if self._http_client:
+            debug_log("[CLEANUP] 关闭HTTP连接池")
+            await self._http_client.aclose()
+            self._http_client = None
 
 
 # 全局token池实例（单例模式）

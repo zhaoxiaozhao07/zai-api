@@ -62,7 +62,7 @@ AUTH_TOKEN=sk-123456
 
 # 匿名Token配置（推荐保持默认值）
 ENABLE_GUEST_TOKEN=true          # 启用匿名Token功能
-GUEST_TOKEN_CACHE_MINUTES=55     # 缓存55分钟
+GUEST_TOKEN_CACHE_MINUTES=30     # 缓存30分钟
 
 # 功能开关
 ENABLE_TOOLIFY=true              # 启用工具调用功能
@@ -181,15 +181,15 @@ response = client.chat.completions.create(
 
 ### 环境变量
 
-| 变量名                     | 说明                  | 默认值                                     |
-| -------------------------- | --------------------- | ------------------------------------------ |
+| 变量名                     | 说明                  | 默认值                                      |
+| -------------------------- | --------------------- |------------------------------------------|
 | `API_ENDPOINT`           | Z.AI API 地址         | `https://chat.z.ai/api/chat/completions` |
-| `ZAI_TOKEN`              | Z.AI 认证 Token（可选）| -                                          |
+| `ZAI_TOKEN`              | Z.AI 认证 Token（可选）| -                                        |
 | `ZAI_SIGNING_SECRET`     | 签名密钥              | `junjie`                                 |
 | `AUTH_TOKEN`             | API Key（客户端认证） | `sk-your-api-key`                        |
 | `LISTEN_PORT`            | 服务监听端口          | `8080`                                   |
 | `ENABLE_GUEST_TOKEN`     | 启用匿名Token功能     | `true`                                   |
-| `GUEST_TOKEN_CACHE_MINUTES` | 匿名Token缓存时间（分钟） | `55`                                     |
+| `GUEST_TOKEN_CACHE_MINUTES` | 匿名Token缓存时间（分钟） | `30`                                      |
 | `ZAI_AUTH_ENDPOINT`      | Z.AI认证API端点       | `https://chat.z.ai/api/v1/auths/`        |
 | `PRIMARY_MODEL`          | 主模型名称            | `GLM-4.5`                                |
 | `THINKING_MODEL`         | 思考模型名称          | `GLM-4.5-Thinking`                       |
@@ -200,12 +200,12 @@ response = client.chat.completions.create(
 | `GLM_46_THINKING_MODEL`  | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
 | `GLM_46_SEARCH_MODEL`    | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
 | `ENABLE_TOOLIFY`         | 启用工具调用功能      | `true`                                   |
-| `TOOLIFY_CUSTOM_PROMPT`  | 自定义工具调用提示词  | -                                          |
+| `TOOLIFY_CUSTOM_PROMPT`  | 自定义工具调用提示词  | -                                        |
 | `DEBUG_LOGGING`          | 详细日志输出          | `true`                                   |
 | `SKIP_AUTH_TOKEN`        | 跳过认证（用于测试）  | `false`                                  |
 | `MAX_RETRIES`            | 请求重试次数          | `3`                                      |
-| `HTTP_PROXY`             | HTTP 代理地址         | -                                          |
-| `HTTPS_PROXY`            | HTTPS 代理地址        | -                                          |
+| `HTTP_PROXY`             | HTTP 代理地址         | -                                        |
+| `HTTPS_PROXY`            | HTTPS 代理地址        | -                                        |
 
 ## API 端点
 
