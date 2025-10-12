@@ -151,13 +151,14 @@ async def get_header_template() -> Dict[str, str]:
     return _header_template_cache.copy()
 
 
-def clear_header_template():
+async def clear_header_template():
     """
-    清除缓存的header模板，强制下次调用时重新生成
+    清除缓存的header模板，强制下次调用时重新生成（线程安全）
     """
     global _header_template_cache
-    _header_template_cache = None
-    debug_log("🔄 Header模板缓存已清除")
+    async with _header_cache_lock:
+        _header_template_cache = None
+        debug_log("🔄 Header模板缓存已清除")
 
 
 async def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
@@ -308,9 +309,9 @@ class ZAITransformer:
         await token_pool.clear_anonymous_token_cache()  # 调用异步版本
         debug_log("[TRANSFORMER] 匿名Token缓存已清理")
     
-    def refresh_header_template(self):
+    async def refresh_header_template(self):
         """刷新header模板（清除缓存并重新生成）"""
-        clear_header_template()
+        await clear_header_template()
         debug_log("🔄 Header模板已刷新，下次请求将使用新的header")
     
     def _has_image_content(self, messages: List[Dict]) -> bool:

@@ -399,7 +399,9 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     # 匿名Token：任何错误都清理缓存并重新获取
                                     debug_log(f"[ANONYMOUS] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
                                     await transformer.clear_anonymous_token_cache()
-                                    
+                                    # 刷新header模板
+                                    debug_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
+                                    await transformer.refresh_header_template()
                                     # 清理客户端缓存，强制下次重新创建（匿名Token可能导致连接状态异常）
                                     debug_log("[CLIENT] 清理HTTP客户端缓存，下次请求将创建新客户端")
                                     await cleanup_clients()
@@ -415,7 +417,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     if response.status_code in [400, 401, 405]:
                                         debug_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
                                         new_token = await transformer.switch_token()
-                                        transformer.refresh_header_template()
+                                        await transformer.refresh_header_template()
                                         transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
                                         debug_log(f"[OK] 已切换到下一个配置Token")
                                     
@@ -1131,7 +1133,9 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             # 匿名Token：任何错误都清理缓存并重新获取
                             debug_log(f"[ANONYMOUS-NONSTREAM] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
                             await transformer.clear_anonymous_token_cache()
-                            
+                            # 刷新header模板
+                            debug_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
+                            await transformer.refresh_header_template()
                             # 清理客户端缓存，强制下次重新创建
                             debug_log("[CLIENT-NONSTREAM] 清理HTTP客户端缓存，下次请求将创建新客户端")
                             await cleanup_clients()
@@ -1152,7 +1156,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             if response.status_code in [400, 401, 405]:
                                 debug_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
                                 new_token = await transformer.switch_token()
-                                transformer.refresh_header_template()
+                                await transformer.refresh_header_template()
                                 request_dict = request.model_dump()
                                 transformed = await transformer.transform_request_in(request_dict, client=client)
                                 debug_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
