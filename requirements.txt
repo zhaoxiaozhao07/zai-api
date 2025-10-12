@@ -6,7 +6,6 @@ pydantic-settings>=2.0.0
 
 # HTTP 客户端（包含 brotli 和 zstandard 支持以处理压缩响应）
 httpx[http2,brotli,zstd]>=0.25.0
-httpx[socks]>=1.0.0
 brotli>=1.0.9
 zstandard>=0.21.0
 
