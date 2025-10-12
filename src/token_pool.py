@@ -265,6 +265,18 @@ class TokenPool:
                 debug_log("[ERROR] 无法获取匿名Token")
                 return None
     
+    async def clear_anonymous_token_cache(self):
+        """
+        清理匿名Token缓存（当Token失效时调用）
+        线程安全版本，使用异步锁保护
+        """
+        async with self._fetch_lock:  # 使用同一个锁，防止清理和获取的竞态条件
+            debug_log("[CACHE] 安全清理匿名Token缓存")
+            old_token = self._anonymous_token[:20] + "..." if self._anonymous_token else "None"
+            self._anonymous_token = None
+            self._anonymous_token_expires_at = None
+            debug_log(f"[CACHE] 匿名Token缓存已清理，原Token: {old_token}")
+    
     async def get_token(self, http_client=None) -> str:
         """
         获取Token（智能降级策略）
@@ -361,8 +373,17 @@ class TokenPool:
         return status
     
     def is_anonymous_token(self, token: str) -> bool:
-        """检测是否为匿名Token"""
-        return token == self._anonymous_token
+        """
+        检测是否为匿名Token
+        
+        Args:
+            token: 要检测的Token
+            
+        Returns:
+            bool: 如果是匿名Token返回True
+        """
+        # 线程安全的读取，不需要锁
+        return token == self._anonymous_token if self._anonymous_token else False
     
     async def reload(self):
         """重新加载token池"""

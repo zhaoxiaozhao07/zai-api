@@ -290,6 +290,15 @@ class ZAITransformer:
         token = await token_pool.switch_to_next()
         return token
     
+    async def clear_anonymous_token_cache(self):
+        """
+        清理匿名Token缓存（当Token失效时调用）
+        线程安全版本
+        """
+        token_pool = get_token_pool()
+        await token_pool.clear_anonymous_token_cache()  # 调用异步版本
+        debug_log("[TRANSFORMER] 匿名Token缓存已清理")
+    
     def _has_image_content(self, messages: List[Dict]) -> bool:
         """
         检测消息中是否包含图像

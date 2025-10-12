@@ -214,6 +214,9 @@ def calculate_backoff_delay(retry_count: int, status_code: int = None, base_dela
     elif status_code in [502, 503, 504]:  # 服务端错误 - 适中延迟
         exponential_delay *= 1.5
         debug_log("[BACKOFF] 检测到服务端错误，使用适中退避时间")
+    elif status_code in [403, 405]:  # 权限/方法错误 - 较短延迟（因为会切换Token）
+        exponential_delay *= 0.5
+        debug_log(f"[BACKOFF] 检测到{status_code}错误，使用较短退避时间（将切换Token）")
     elif status_code in [400, 401]:  # 认证/请求错误 - 标准延迟
         debug_log("[BACKOFF] 检测到认证/请求错误，使用标准退避时间")
     
@@ -382,25 +385,46 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                 error_detail=error_msg[:200]
                             )
                             
-                            # 可重试的错误
-                            retryable_codes = [400, 401, 429, 502, 503, 504]
+                            # 优化的错误处理策略
+                            retryable_codes = [400, 401, 403, 405, 429, 502, 503, 504]
                             if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
-                                # 记录状态码和错误信息，用于智能退避策略
+                                # 记录状态码和错误信息
                                 last_status_code = response.status_code
                                 last_error = f"{response.status_code}: {error_msg}"
                                 retry_count += 1
                                 
-                                # 如果是401认证失败或400错误，尝试切换token
-                                if response.status_code in [400, 401]:
-                                    debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
-                                    new_token = await transformer.switch_token()
-                                    # 使用新token重新生成请求（继续使用同一个客户端）
-                                    transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
-                                    debug_log(f"[OK] 已切换token并重新生成请求")
+                                # 检查当前是否使用匿名Token
+                                from .token_pool import get_token_pool
+                                token_pool = get_token_pool()
+                                current_token = transformed.get("token", "")
+                                is_anonymous = token_pool.is_anonymous_token(current_token)
                                 
-                                # 网络错误时尝试切换代理（仅限 failover 策略）
-                                if response.status_code in [502, 503, 504] and _proxy_list:
-                                    await switch_proxy_on_failure()
+                                if is_anonymous:
+                                    # 匿名Token：任何错误都清理缓存并重新获取
+                                    debug_log(f"[ANONYMOUS] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
+                                    await transformer.clear_anonymous_token_cache()
+                                    
+                                    # 清理客户端缓存，强制下次重新创建（匿名Token可能导致连接状态异常）
+                                    debug_log("[CLIENT] 清理HTTP客户端缓存，下次请求将创建新客户端")
+                                    await cleanup_clients()
+                                    
+                                    # 重新获取客户端
+                                    request_client = await get_request_client()
+                                    
+                                    # 使用新的匿名Token重新生成请求
+                                    transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+                                    debug_log("[OK] 已获取新的匿名Token并重新生成请求")
+                                else:
+                                    # 配置Token：按原有逻辑处理
+                                    if response.status_code in [400, 401, 403, 405]:
+                                        debug_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
+                                        new_token = await transformer.switch_token()
+                                        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+                                        debug_log(f"[OK] 已切换到下一个配置Token")
+                                    
+                                    # 网络错误时尝试切换代理（仅限 failover 策略）
+                                    if response.status_code in [502, 503, 504] and _proxy_list:
+                                        await switch_proxy_on_failure()
                                 
                                 continue
                             
@@ -1095,25 +1119,51 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                         error_detail=error_msg[:200]
                     )
                     
-                    # 可重试的错误
-                    retryable_codes = [400, 401, 429, 502, 503, 504]
+                    # 错误处理策略（非流式请求）
+                    retryable_codes = [400, 401, 403, 405, 429, 502, 503, 504]
                     if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
                         last_status_code = response.status_code
                         last_error = f"{response.status_code}: {error_msg}"
                         retry_count += 1
                         
-                        # 如果是401认证失败或400错误，尝试切换token
-                        if response.status_code in [400, 401]:
-                            debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
-                            new_token = await transformer.switch_token()
-                            # 使用新token重新生成请求（继续使用同一个客户端）
+                        # 检查当前是否使用匿名Token
+                        from .token_pool import get_token_pool
+                        token_pool = get_token_pool()
+                        current_token = transformed.get("token", "")
+                        is_anonymous = token_pool.is_anonymous_token(current_token)
+                        
+                        if is_anonymous:
+                            # 匿名Token：任何错误都清理缓存并重新获取
+                            debug_log(f"[ANONYMOUS-NONSTREAM] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
+                            await transformer.clear_anonymous_token_cache()
+                            
+                            # 清理客户端缓存，强制下次重新创建
+                            debug_log("[CLIENT-NONSTREAM] 清理HTTP客户端缓存，下次请求将创建新客户端")
+                            await cleanup_clients()
+                            
+                            # 重新获取客户端
+                            if request_client:
+                                request_client = await get_request_client()
+                                client = request_client
+                            else:
+                                client = await get_request_client()
+                            
+                            # 使用新的匿名Token重新生成请求
                             request_dict = request.model_dump()
                             transformed = await transformer.transform_request_in(request_dict, client=client)
-                            debug_log(f"[OK] 已切换token并重新生成请求")
-                        
-                        # 网络错误时尝试切换代理（仅限 failover 策略）
-                        if response.status_code in [502, 503, 504] and _proxy_list:
-                            await switch_proxy_on_failure()
+                            debug_log("[OK-NONSTREAM] 已获取新的匿名Token并重新生成请求")
+                        else:
+                            # 配置Token：按原有逻辑处理
+                            if response.status_code in [400, 401, 403, 405]:
+                                debug_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
+                                new_token = await transformer.switch_token()
+                                request_dict = request.model_dump()
+                                transformed = await transformer.transform_request_in(request_dict, client=client)
+                                debug_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
+                            
+                            # 网络错误时尝试切换代理（仅限 failover 策略）
+                            if response.status_code in [502, 503, 504] and _proxy_list:
+                                await switch_proxy_on_failure()
                         
                         continue
                     
