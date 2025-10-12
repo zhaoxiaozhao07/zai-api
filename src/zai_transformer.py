@@ -114,7 +114,7 @@ def get_header_template() -> Dict[str, str]:
         # 设置特定于Z.AI的headers
         base_headers["Origin"] = "https://chat.z.ai"
         base_headers["Content-Type"] = "application/json"
-        base_headers["X-Fe-Version"] = "prod-fe-1.0.95"
+        base_headers["X-Fe-Version"] = "prod-fe-1.0.97"
         
         # 设置Fetch相关headers（用于CORS请求）
         base_headers["Sec-Fetch-Dest"] = "empty"
@@ -140,6 +140,16 @@ def get_header_template() -> Dict[str, str]:
                   has_sec_ch_ua=("sec-ch-ua" in base_headers or "Sec-Ch-Ua" in base_headers))
     
     return _header_template_cache.copy()
+
+
+def clear_header_template():
+    """
+    清除缓存的header模板，强制下次调用时重新生成
+    """
+    global _header_template_cache, _header_cache_lock
+    _header_template_cache = None
+    _header_cache_lock = False
+    debug_log("🔄 Header模板缓存已清除")
 
 
 def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
@@ -264,6 +274,11 @@ class ZAITransformer:
         token_pool = get_token_pool()
         token = token_pool.switch_to_next()
         return token
+    
+    def refresh_header_template(self):
+        """刷新header模板（清除缓存并重新生成）"""
+        clear_header_template()
+        debug_log("🔄 Header模板已刷新，下次请求将使用新的header")
     
     def _process_messages(self, messages: list, is_vision_model: bool = False) -> Tuple[list, list]:
         """
@@ -468,7 +483,7 @@ class ZAITransformer:
             "model_item": {
                 "id": upstream_model_id,
                 "name": requested_model,
-                "owned_by": "z.ai"
+                "owned_by": "openai"
             },
             "chat_id": chat_id,
             "id": generate_uuid(),

@@ -110,7 +110,7 @@ async def close_http_client():
             debug_log("HTTP客户端已关闭")
 
 
-def calculate_backoff_delay(retry_count: int, status_code: int = None, base_delay: float = 3.0, max_delay: float = 30.0) -> float:
+def calculate_backoff_delay(retry_count: int, status_code: int = None, base_delay: float = 1.5, max_delay: float = 8.0) -> float:
     """
     计算退避延迟时间（带随机抖动和针对不同错误的策略）
     
@@ -123,34 +123,35 @@ def calculate_backoff_delay(retry_count: int, status_code: int = None, base_dela
     Returns:
         计算后的延迟时间（秒）
     """
-    # 基础指数退避：base_delay * 2^(retry_count-1)
-    exponential_delay = base_delay * (2 ** (retry_count - 1))
+    # 使用线性增长而非指数增长：base_delay * retry_count
+    # 这样：第1次=1.5s, 第2次=3s, 第3次=4.5s, 第4次=6s
+    linear_delay = base_delay * retry_count
     
     # 针对不同错误类型调整延迟
     if status_code == 429:  # Rate limit - 更长的退避时间
-        exponential_delay *= 2.0  # 双倍延迟
+        linear_delay *= 1.5  # 1.5倍延迟
         debug_log("[BACKOFF] 检测到429限流错误，使用更长退避时间")
     elif status_code in [502, 503, 504]:  # 服务端错误 - 适中延迟
-        exponential_delay *= 1.5
+        linear_delay *= 1.2  # 1.2倍延迟
         debug_log("[BACKOFF] 检测到服务端错误，使用适中退避时间")
-    elif status_code in [400, 401]:  # 认证/请求错误 - 标准延迟
-        debug_log("[BACKOFF] 检测到认证/请求错误，使用标准退避时间")
+    elif status_code in [400, 401, 405]:  # 认证/请求错误 - 标准延迟
+        debug_log(f"[BACKOFF] 检测到{status_code}认证/请求错误，使用标准退避时间")
     
     # 限制最大延迟
-    exponential_delay = min(exponential_delay, max_delay)
+    linear_delay = min(linear_delay, max_delay)
     
-    # 添加随机抖动因子（±25%），避免多个请求同时重试造成雪崩
-    jitter = exponential_delay * 0.25  # 25%的抖动范围
-    jittered_delay = exponential_delay + random.uniform(-jitter, jitter)
+    # 添加随机抖动因子（±20%），避免多个请求同时重试造成雪崩
+    jitter = linear_delay * 0.2  # 20%的抖动范围
+    jittered_delay = linear_delay + random.uniform(-jitter, jitter)
     
-    # 确保延迟不会小于基础延迟的一半
-    final_delay = max(jittered_delay, base_delay * 0.5)
+    # 确保延迟不会小于0.5秒
+    final_delay = max(jittered_delay, 0.5)
     
     debug_log(
         "[BACKOFF] 计算退避延迟",
         retry_count=retry_count,
         status_code=status_code,
-        exponential=f"{exponential_delay:.2f}s",
+        linear=f"{linear_delay:.2f}s",
         final=f"{final_delay:.2f}s"
     )
     
@@ -252,12 +253,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                 try:
                     # 智能退避重试策略（带随机抖动和错误类型区分）
                     if retry_count > 0:
-                        # 使用智能退避策略计算延迟
+                        # 使用智能退避策略计算延迟（线性增长：1.5s, 3s, 4.5s, 6s...）
                         delay = calculate_backoff_delay(
                             retry_count=retry_count,
-                            status_code=last_status_code,
-                            base_delay=3.0,
-                            max_delay=40.0
+                            status_code=last_status_code
                         )
                         debug_log(
                             f"[RETRY] 重试请求 ({retry_count}/{settings.MAX_RETRIES})",
@@ -296,20 +295,22 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                             )
                             
                             # 可重试的错误
-                            retryable_codes = [400, 401, 429, 502, 503, 504]
+                            retryable_codes = [400, 401, 405, 429, 502, 503, 504]
                             if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
                                 # 记录状态码和错误信息，用于智能退避策略
                                 last_status_code = response.status_code
                                 last_error = f"{response.status_code}: {error_msg}"
                                 retry_count += 1
                                 
-                                # 如果是401认证失败或400错误，尝试切换token
-                                if response.status_code in [400, 401]:
-                                    debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
-                                    new_token = transformer.switch_token()
-                                    # 使用新token重新生成请求
-                                    transformed = await transformer.transform_request_in(request_dict, client=client)
-                                    debug_log(f"[OK] 已切换token并重新生成请求")
+                                # 所有可重试错误都切换token并重新生成header模板
+                                debug_log(f"[SWITCH] 检测到{response.status_code}错误，尝试切换token并重新生成header")
+                                new_token = transformer.switch_token()
+                                # 清除并重新生成header模板
+                                debug_log("[HEADER] 清除header缓存并重新生成")
+                                transformer.refresh_header_template()
+                                # 使用新token和新header重新生成请求
+                                transformed = await transformer.transform_request_in(request_dict, client=client)
+                                debug_log(f"[OK] 已切换token并重新生成请求（新header）")
                                 
                                 continue
                             
@@ -943,9 +944,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             if retry_count > 0:
                 delay = calculate_backoff_delay(
                     retry_count=retry_count,
-                    status_code=last_status_code,
-                    base_delay=3.0,
-                    max_delay=40.0
+                    status_code=last_status_code
                 )
                 debug_log(
                     f"[RETRY] 非流式请求重试 ({retry_count}/{settings.MAX_RETRIES})",
@@ -982,20 +981,22 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                     )
                     
                     # 可重试的错误
-                    retryable_codes = [400, 401, 429, 502, 503, 504]
+                    retryable_codes = [400, 401, 405, 429, 502, 503, 504]
                     if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
                         last_status_code = response.status_code
                         last_error = f"{response.status_code}: {error_msg}"
                         retry_count += 1
                         
-                        # 如果是401认证失败或400错误，尝试切换token
-                        if response.status_code in [400, 401]:
-                            debug_log("[SWITCH] 检测到认证/请求错误，尝试切换token")
-                            new_token = transformer.switch_token()
-                            # 使用新token重新生成请求
-                            request_dict = request.model_dump()
-                            transformed = await transformer.transform_request_in(request_dict, client=client)
-                            debug_log(f"[OK] 已切换token并重新生成请求")
+                        # 所有可重试错误都切换token并重新生成header模板
+                        debug_log(f"[SWITCH] 检测到{response.status_code}错误，尝试切换token并重新生成header")
+                        new_token = transformer.switch_token()
+                        # 清除并重新生成header模板
+                        debug_log("[HEADER] 清除header缓存并重新生成")
+                        transformer.refresh_header_template()
+                        # 使用新token和新header重新生成请求
+                        request_dict = request.model_dump()
+                        transformed = await transformer.transform_request_in(request_dict, client=client)
+                        debug_log(f"[OK] 已切换token并重新生成请求（新header）")
                         
                         continue
                     
