@@ -5,6 +5,7 @@
 ZAI格式转换器
 """
 
+import asyncio
 import time
 import random
 from typing import Dict, Any, Tuple, List, Optional
@@ -14,6 +15,7 @@ from furl import furl
 from dateutil import tz
 from datetime import datetime
 from browserforge.headers import HeaderGenerator
+from fastapi import HTTPException
 
 from .config import settings, MODEL_MAPPING
 from .helpers import debug_log, perf_timer, perf_track
@@ -91,21 +93,28 @@ def generate_uuid() -> str:
 
 # Header模板缓存（减少BrowserForge调用）
 _header_template_cache = None
-_header_cache_lock = False
+_header_cache_lock = asyncio.Lock()
 
 
-def get_header_template() -> Dict[str, str]:
+async def get_header_template() -> Dict[str, str]:
     """
-    获取缓存的header模板（仅在首次调用时生成）
+    获取缓存的header模板（仅在首次调用时生成，线程安全）
     
     Returns:
         header模板字典
     """
-    global _header_template_cache, _header_cache_lock
+    global _header_template_cache
     
-    # 简单的单例模式（无需线程锁，因为是单进程应用）
-    if _header_template_cache is None and not _header_cache_lock:
-        _header_cache_lock = True
+    # 快速路径：如果已经缓存了，直接返回
+    if _header_template_cache is not None:
+        return _header_template_cache.copy()
+    
+    # 使用异步锁保护缓存初始化
+    async with _header_cache_lock:
+        # 双重检查：可能其他协程已经初始化了
+        if _header_template_cache is not None:
+            return _header_template_cache.copy()
+        
         header_gen = get_header_generator_instance()
         
         # 使用BrowserForge生成基础headers（仅一次）
@@ -142,18 +151,18 @@ def get_header_template() -> Dict[str, str]:
     return _header_template_cache.copy()
 
 
-def clear_header_template():
+async def clear_header_template():
     """
-    清除缓存的header模板，强制下次调用时重新生成
+    清除缓存的header模板，强制下次调用时重新生成（线程安全）
     """
-    global _header_template_cache, _header_cache_lock
-    _header_template_cache = None
-    _header_cache_lock = False
-    debug_log("🔄 Header模板缓存已清除")
+    global _header_template_cache
+    async with _header_cache_lock:
+        _header_template_cache = None
+        debug_log("🔄 Header模板缓存已清除")
 
 
-def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
-    """使用缓存的header模板生成headers（性能优化）
+async def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
+    """使用缓存的header模板生成headers（性能优化，线程安全）
     
     Args:
         chat_id: 对话ID，用于生成Referer
@@ -163,7 +172,7 @@ def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, st
         完整的HTTP headers字典
     """
     # 使用缓存的模板（避免每次调用BrowserForge）
-    headers = get_header_template()
+    headers = await get_header_template()
     
     # 仅更新需要变化的字段
     if chat_id:
@@ -261,24 +270,69 @@ class ZAITransformer:
         # 初始化签名生成器
         self.signature_generator = SignatureGenerator()
 
-    def get_token(self) -> str:
-        """获取Z.AI认证令牌（从token池获取）"""
+    async def get_token(self, http_client=None) -> str:
+        """
+        获取Z.AI认证令牌（从token池获取）
+        
+        Args:
+            http_client: 外部传入的HTTP客户端（用于匿名Token获取）
+            
+        Returns:
+            str: 可用的Token
+        """
         token_pool = get_token_pool()
-        token = token_pool.get_token()
+        token = await token_pool.get_token(http_client=http_client)
         
         debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token[:20]}...")
         return token
     
-    def switch_token(self) -> str:
-        """切换到下一个token（请求失败时调用）"""
+    async def switch_token(self, http_client=None) -> str:
+        """
+        切换到下一个token（请求失败时调用）
+        
+        Args:
+            http_client: 外部传入的HTTP客户端（如果切换到匿名Token时使用）
+            
+        Returns:
+            str: 下一个Token
+        """
         token_pool = get_token_pool()
-        token = token_pool.switch_to_next()
+        token = await token_pool.switch_to_next()
         return token
     
-    def refresh_header_template(self):
+    async def clear_anonymous_token_cache(self):
+        """
+        清理匿名Token缓存（当Token失效时调用）
+        线程安全版本
+        """
+        token_pool = get_token_pool()
+        await token_pool.clear_anonymous_token_cache()  # 调用异步版本
+        debug_log("[TRANSFORMER] 匿名Token缓存已清理")
+    
+    async def refresh_header_template(self):
         """刷新header模板（清除缓存并重新生成）"""
-        clear_header_template()
+        await clear_header_template()
         debug_log("🔄 Header模板已刷新，下次请求将使用新的header")
+    
+    def _has_image_content(self, messages: List[Dict]) -> bool:
+        """
+        检测消息中是否包含图像
+        
+        Args:
+            messages: 消息列表
+            
+        Returns:
+            bool: 如果消息中包含图像内容则返回True
+        """
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for part in content:
+                        if (part.get("type") == "image_url" and
+                            part.get("image_url", {}).get("url")):
+                            return True
+        return False
     
     def _process_messages(self, messages: list, is_vision_model: bool = False) -> Tuple[list, list]:
         """
@@ -372,8 +426,19 @@ class ZAITransformer:
         """转换OpenAI请求为z.ai格式"""
         debug_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
-        # 获取认证令牌
-        token = self.get_token()
+        # 获取认证令牌（传入client用于匿名Token获取）
+        token = await self.get_token(http_client=client)
+        
+        # 检查匿名Token是否尝试使用视觉模型
+        token_pool = get_token_pool()
+        messages = request.get("messages", [])
+        
+        if token_pool.is_anonymous_token(token) and self._has_image_content(messages):
+            debug_log("[ERROR] 匿名Token尝试使用视觉功能被拒绝")
+            raise HTTPException(
+                status_code=400,
+                detail="匿名Token不支持图像识别功能，请配置ZAI_TOKEN使用视觉模型。设置环境变量ZAI_TOKEN=your_token后重启服务。"
+            )
 
         # 确定请求的模型特性
         requested_model = request.get("model", settings.PRIMARY_MODEL)
@@ -502,7 +567,7 @@ class ZAITransformer:
         
         # 使用缓存的header模板生成headers（性能优化）
         with perf_timer("generate_headers", threshold_ms=5):
-            dynamic_headers = get_dynamic_headers(chat_id)
+            dynamic_headers = await get_dynamic_headers(chat_id)
         
         # 从生成的headers中提取User-Agent
         user_agent = dynamic_headers.get("User-Agent", "")

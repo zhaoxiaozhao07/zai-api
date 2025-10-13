@@ -9,6 +9,7 @@ import asyncio
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse
 import httpx
+from typing import Optional, Dict
 
 from .config import settings
 from .schemas import OpenAIRequest, ModelsResponse, Model
@@ -48,67 +49,147 @@ logger = get_logger("openai_api")
 # 全局转换器实例
 transformer = ZAITransformer()
 
-# 全局httpx客户端配置（连接池复用）
-_http_client = None
-_client_lock = asyncio.Lock()
+# ================== 客户端池管理 ==================
+# 为每个代理维护一个长期客户端（复用连接）
+_proxy_clients: Dict[str, httpx.AsyncClient] = {}
+_default_client: Optional[httpx.AsyncClient] = None  # 无代理时的默认客户端
+_client_lock = asyncio.Lock()  # 保护客户端池的并发访问
 
+# 优化的连接池配置
+CONNECTION_POOL_CONFIG = {
+    "limits": httpx.Limits(
+        max_keepalive_connections=20,  # 保持连接数
+        max_connections=100,            # 最大连接数
+        keepalive_expiry=30,           # 连接保活时间
+    ),
+    "timeout": httpx.Timeout(
+        connect=10.0,    # 连接超时
+        read=30.0,       # 读取超时
+        write=30.0,      # 写入超时
+        pool=10.0,       # 连接池获取超时
+    ),
+    "http2": True,  # 启用HTTP/2
+}
 
-async def get_http_client() -> httpx.AsyncClient:
+async def get_or_create_client(proxy_url: Optional[str] = None) -> httpx.AsyncClient:
     """
-    获取或创建全局httpx客户端（单例模式，支持连接池复用）
-    使用asyncio特性进行并发控制
-    """
-    global _http_client
+    获取或创建HTTP客户端（简单的池化复用，线程安全）
     
-    async with _client_lock:
-        if _http_client is None or _http_client.is_closed:
-            proxy = settings.HTTPS_PROXY or settings.HTTP_PROXY
-            
-            # 配置连接池和超时
-            limits = httpx.Limits(
-                max_connections=100,  # 最大连接数
-                max_keepalive_connections=20,  # 保持活动的连接数
-                keepalive_expiry=30.0  # 保持活动超时时间
-            )
-            
-            timeout = httpx.Timeout(
-                connect=10.0,  # 连接超时
-                read=60.0,     # 读取超时
-                write=10.0,    # 写入超时
-                pool=5.0       # 连接池超时
-            )
-            if proxy:
-                debug_log("使用代理创建HTTP客户端", proxy=proxy)
-                _http_client = httpx.AsyncClient(
-                    timeout=timeout,
-                    limits=limits,
-                    proxy=proxy,
-                    http2=True,  # 启用HTTP/2支持
-                    follow_redirects=True
-                )
-            else:
-                debug_log("未使用代理创建HTTP客户端")
-                _http_client = httpx.AsyncClient(
-                    timeout=timeout,
-                    limits=limits,
-                    http2=True,  # 启用HTTP/2支持
-                    follow_redirects=True
-                )
-
+    Args:
+        proxy_url: 代理地址，如果为None则使用直连
+    
+    Returns:
+        httpx.AsyncClient: 复用的HTTP客户端
+    """
+    global _proxy_clients, _default_client
+    
+    async with _client_lock:  # 保护并发访问
+        # 直连情况
+        if proxy_url is None:
+            if _default_client is None:
+                debug_log("[CLIENT] 创建默认客户端（无代理）")
+                _default_client = httpx.AsyncClient(**CONNECTION_POOL_CONFIG)
+            return _default_client
         
-        return _http_client
+        # 代理情况
+        if proxy_url not in _proxy_clients:
+            debug_log(f"[CLIENT] 为代理创建新客户端: {proxy_url}")
+            _proxy_clients[proxy_url] = httpx.AsyncClient(
+                proxy=proxy_url,
+                **CONNECTION_POOL_CONFIG
+            )
+        
+        return _proxy_clients[proxy_url]
 
-
-async def close_http_client():
-    """关闭全局httpx客户端"""
-    global _http_client
+async def cleanup_clients():
+    """清理所有缓存的HTTP客户端"""
+    global _proxy_clients, _default_client
     
-    async with _client_lock:
-        if _http_client is not None and not _http_client.is_closed:
-            await _http_client.aclose()
-            _http_client = None
-            debug_log("HTTP客户端已关闭")
+    # 关闭所有代理客户端
+    for proxy_url, client in _proxy_clients.items():
+        debug_log(f"[CLIENT] 关闭代理客户端: {proxy_url}")
+        await client.aclose()
+    _proxy_clients.clear()
+    
+    # 关闭默认客户端
+    if _default_client:
+        debug_log("[CLIENT] 关闭默认客户端")
+        await _default_client.aclose()
+        _default_client = None
+    
+    debug_log("[CLIENT] 所有客户端已清理")
 
+# ================== 代理池管理 ==================
+_proxy_list = []  # 代理列表
+_proxy_index = 0  # 当前代理索引
+_proxy_lock = asyncio.Lock()  # 代理切换锁
+
+def init_proxy_pool():
+    """初始化代理池"""
+    global _proxy_list
+    
+    # 优先使用 HTTPS_PROXY_LIST，如果没有则使用 HTTP_PROXY_LIST
+    _proxy_list = settings.HTTPS_PROXY_LIST or settings.HTTP_PROXY_LIST
+    
+    if _proxy_list:
+        debug_log(f"[PROXY] 初始化代理池，共 {len(_proxy_list)} 个代理，策略: {settings.PROXY_STRATEGY}")
+        for i, proxy in enumerate(_proxy_list):
+            debug_log(f"  代理 {i+1}: {proxy}")
+
+def get_next_proxy() -> Optional[str]:
+    """
+    获取下一个代理（根据策略）
+    
+    Returns:
+        Optional[str]: 代理地址，如果没有可用代理则返回 None
+    """
+    global _proxy_index
+    
+    if not _proxy_list:
+        return None
+    
+    if settings.PROXY_STRATEGY == "round-robin":
+        # 轮询策略：每次调用都切换到下一个代理
+        proxy = _proxy_list[_proxy_index]
+        _proxy_index = (_proxy_index + 1) % len(_proxy_list)
+        debug_log(f"[PROXY] Round-robin选择代理 {_proxy_index}: {proxy}")
+        return proxy
+    else:
+        # failover 策略：始终使用当前索引的代理
+        proxy = _proxy_list[_proxy_index]
+        debug_log(f"[PROXY] Failover使用代理 {_proxy_index}: {proxy}")
+        return proxy
+
+async def switch_proxy_on_failure():
+    """
+    失败时切换代理（仅 failover 策略需要）
+    """
+    global _proxy_index
+    
+    if not _proxy_list or settings.PROXY_STRATEGY != "failover":
+        return
+    
+    async with _proxy_lock:
+        old_index = _proxy_index
+        _proxy_index = (_proxy_index + 1) % len(_proxy_list)
+        debug_log(f"[PROXY] 代理失败，从 {old_index} 切换到 {_proxy_index}: {_proxy_list[_proxy_index]}")
+
+# 初始化代理池
+init_proxy_pool()
+
+async def get_request_client() -> httpx.AsyncClient:
+    """
+    为当前请求获取合适的HTTP客户端（简化版）
+    使用客户端池复用连接，每个代理维护一个长期客户端
+    
+    Returns:
+        httpx.AsyncClient: 复用的HTTP客户端
+    """
+    # 获取当前应该使用的代理
+    proxy = get_next_proxy()
+    
+    # 获取或创建对应的客户端
+    return await get_or_create_client(proxy)
 
 def calculate_backoff_delay(retry_count: int, status_code: int = None, base_delay: float = 1.5, max_delay: float = 8.0) -> float:
     """
@@ -189,6 +270,9 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         tools_count=len(request.tools) if request.tools else 0
     )
     
+    # 获取复用的HTTP客户端
+    request_client = None
+    
     try:
         # Validate API key
         if not settings.SKIP_AUTH_TOKEN:
@@ -198,6 +282,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             api_key = authorization[7:]
             if api_key != settings.AUTH_TOKEN:
                 raise HTTPException(status_code=401, detail="Invalid API key")
+        
+        # 获取复用的HTTP客户端
+        request_client = await get_request_client()
+        debug_log("[REQUEST] 获取复用HTTP客户端")
             
         # 转换请求
         request_dict = request.model_dump()
@@ -222,21 +310,20 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         
         debug_log("开始转换请求格式: OpenAI -> Z.AI")
         
-        # 获取全局HTTP客户端（用于图像上传）
-        client = await get_http_client()
-        
-        # 初始转换（传入client用于图像上传）
-        transformed = await transformer.transform_request_in(request_dict_for_transform, client=client)
+        # 初始转换（传入request_client用于图像上传和Token获取）
+        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
         
         # 根据stream参数决定返回流式或非流式响应
         if not request.stream:
             debug_log("使用非流式模式")
-            return await handle_non_stream_request(request, transformed, enable_toolify)
+            result = await handle_non_stream_request(request, transformed, enable_toolify, request_client)
+            return result
 
         # 调用上游API（流式模式）
         async def stream_response():
             """流式响应生成器（包含重试机制、智能退避策略和工具调用检测）"""
             nonlocal transformed  # 声明使用外部作用域的transformed变量
+            nonlocal request_client  # 声明使用外部作用域的request_client变量
             retry_count = 0
             last_error = None
             last_status_code = None  # 记录上次失败的状态码
@@ -267,8 +354,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         )
                         await asyncio.sleep(delay)
 
-                    # 获取全局HTTP客户端（复用连接池）
-                    client = await get_http_client()
+                    # 使用请求专用的HTTP客户端
+                    client = request_client
                     
                     # 发起流式请求（带性能追踪）
                     # 使用转换后的headers（包含Accept-Encoding）
@@ -297,20 +384,46 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                             # 可重试的错误
                             retryable_codes = [400, 401, 405, 429, 502, 503, 504]
                             if response.status_code in retryable_codes and retry_count < settings.MAX_RETRIES:
-                                # 记录状态码和错误信息，用于智能退避策略
+                                # 记录状态码和错误信息
                                 last_status_code = response.status_code
                                 last_error = f"{response.status_code}: {error_msg}"
                                 retry_count += 1
                                 
-                                # 所有可重试错误都切换token并重新生成header模板
-                                debug_log(f"[SWITCH] 检测到{response.status_code}错误，尝试切换token并重新生成header")
-                                new_token = transformer.switch_token()
-                                # 清除并重新生成header模板
-                                debug_log("[HEADER] 清除header缓存并重新生成")
-                                transformer.refresh_header_template()
-                                # 使用新token和新header重新生成请求
-                                transformed = await transformer.transform_request_in(request_dict, client=client)
-                                debug_log(f"[OK] 已切换token并重新生成请求（新header）")
+                                # 检查当前是否使用匿名Token
+                                from .token_pool import get_token_pool
+                                token_pool = get_token_pool()
+                                current_token = transformed.get("token", "")
+                                is_anonymous = token_pool.is_anonymous_token(current_token)
+                                
+                                if is_anonymous:
+                                    # 匿名Token：任何错误都清理缓存并重新获取
+                                    debug_log(f"[ANONYMOUS] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
+                                    await transformer.clear_anonymous_token_cache()
+                                    # 刷新header模板
+                                    debug_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
+                                    await transformer.refresh_header_template()
+                                    # 清理客户端缓存，强制下次重新创建（匿名Token可能导致连接状态异常）
+                                    debug_log("[CLIENT] 清理HTTP客户端缓存，下次请求将创建新客户端")
+                                    await cleanup_clients()
+                                    
+                                    # 重新获取客户端
+                                    request_client = await get_request_client()
+                                    
+                                    # 使用新的匿名Token重新生成请求
+                                    transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+                                    debug_log("[OK] 已获取新的匿名Token并重新生成请求")
+                                else:
+                                    # 配置Token：按原有逻辑处理
+                                    if response.status_code in [400, 401, 405]:
+                                        debug_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
+                                        new_token = await transformer.switch_token()
+                                        await transformer.refresh_header_template()
+                                        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+                                        debug_log(f"[OK] 已切换到下一个配置Token")
+                                    
+                                    # 网络错误时尝试切换代理（仅限 failover 策略）
+                                    if response.status_code in [502, 503, 504] and _proxy_list:
+                                        await switch_proxy_on_failure()
                                 
                                 continue
                             
@@ -416,6 +529,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         )
                                                         for chunk in tool_chunks:
                                                             yield chunk
+                                                        # 检测到工具调用后提前结束
+                                                        debug_log("[REQUEST] 流式响应（早期工具调用检测）完成")
                                                         return
                                                     else:
                                                         debug_log("[TOOLIFY] finalize()未检测到工具调用")
@@ -829,6 +944,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                 )
                                 for chunk in tool_chunks:
                                     yield chunk
+                                # 流式响应完成
+                                debug_log("[REQUEST] 流式响应（工具调用）完成")
                                 return
                         
                         debug_log("[SSE] 流自然结束 - 没有工具调用，输出finish chunk")
@@ -853,12 +970,18 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         }
                         yield f"data: {json_lib.dumps(finish_chunk)}\n\n"
                         yield "data: [DONE]\n\n"
+                        # 流式响应正常完成
+                        debug_log("[REQUEST] 流式响应完成")
                         return
 
                 except Exception as e:
                     debug_log("流处理错误", error=str(e))
                     retry_count += 1
                     last_error = str(e)
+                    
+                    # 网络连接错误时尝试切换代理（仅限 failover 策略）
+                    if _proxy_list and "connect" in str(e).lower():
+                        await switch_proxy_on_failure()
 
                     if retry_count > settings.MAX_RETRIES:
                         error_response = {
@@ -869,6 +992,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         }
                         yield f"data: {json_lib.dumps(error_response)}\n\n"
                         yield "data: [DONE]\n\n"
+                        # 流式响应错误完成
+                        debug_log("[REQUEST] 流式响应错误")
                         return
 
         return StreamingResponse(
@@ -881,9 +1006,11 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         )
 
     except HTTPException:
+        debug_log("[REQUEST] 处理HTTPException")
         raise
     except Exception as e:
         debug_log("处理请求时发生错误", error=str(e))
+        debug_log("[REQUEST] 处理异常")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
@@ -918,9 +1045,15 @@ def create_openai_response(chat_id: str, model: str, content: str, reasoning_con
     return response
 
 
-async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, enable_toolify: bool = False) -> dict:
+async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, enable_toolify: bool = False, request_client: httpx.AsyncClient = None) -> dict:
     """
     处理非流式请求
+    
+    Args:
+        request: OpenAI请求对象
+        transformed: 转换后的请求
+        enable_toolify: 是否启用工具调用
+        request_client: 请求专用的HTTP客户端
     
     说明：上游始终以 SSE 形式返回（transform_request_in 固定 stream=True），
     因此这里需要聚合 aiter_lines() 的 data: 块，提取 usage、思考内容与答案内容，
@@ -953,8 +1086,11 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                 )
                 await asyncio.sleep(delay)
             
-            # 获取全局HTTP客户端
-            client = await get_http_client()
+            # 使用提供的客户端，或获取复用的客户端
+            if request_client:
+                client = request_client
+            else:
+                client = await get_request_client()
             
             # 发起流式请求（上游始终返回SSE流，带性能追踪）
             # 使用转换后的headers（包含Accept-Encoding）
@@ -987,16 +1123,47 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                         last_error = f"{response.status_code}: {error_msg}"
                         retry_count += 1
                         
-                        # 所有可重试错误都切换token并重新生成header模板
-                        debug_log(f"[SWITCH] 检测到{response.status_code}错误，尝试切换token并重新生成header")
-                        new_token = transformer.switch_token()
-                        # 清除并重新生成header模板
-                        debug_log("[HEADER] 清除header缓存并重新生成")
-                        transformer.refresh_header_template()
-                        # 使用新token和新header重新生成请求
-                        request_dict = request.model_dump()
-                        transformed = await transformer.transform_request_in(request_dict, client=client)
-                        debug_log(f"[OK] 已切换token并重新生成请求（新header）")
+                        # 检查当前是否使用匿名Token
+                        from .token_pool import get_token_pool
+                        token_pool = get_token_pool()
+                        current_token = transformed.get("token", "")
+                        is_anonymous = token_pool.is_anonymous_token(current_token)
+                        
+                        if is_anonymous:
+                            # 匿名Token：任何错误都清理缓存并重新获取
+                            debug_log(f"[ANONYMOUS-NONSTREAM] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
+                            await transformer.clear_anonymous_token_cache()
+                            # 刷新header模板
+                            debug_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
+                            await transformer.refresh_header_template()
+                            # 清理客户端缓存，强制下次重新创建
+                            debug_log("[CLIENT-NONSTREAM] 清理HTTP客户端缓存，下次请求将创建新客户端")
+                            await cleanup_clients()
+                            
+                            # 重新获取客户端
+                            if request_client:
+                                request_client = await get_request_client()
+                                client = request_client
+                            else:
+                                client = await get_request_client()
+                            
+                            # 使用新的匿名Token重新生成请求
+                            request_dict = request.model_dump()
+                            transformed = await transformer.transform_request_in(request_dict, client=client)
+                            debug_log("[OK-NONSTREAM] 已获取新的匿名Token并重新生成请求")
+                        else:
+                            # 配置Token：按原有逻辑处理
+                            if response.status_code in [400, 401, 405]:
+                                debug_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
+                                new_token = await transformer.switch_token()
+                                await transformer.refresh_header_template()
+                                request_dict = request.model_dump()
+                                transformed = await transformer.transform_request_in(request_dict, client=client)
+                                debug_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
+                            
+                            # 网络错误时尝试切换代理（仅限 failover 策略）
+                            if response.status_code in [502, 503, 504] and _proxy_list:
+                                await switch_proxy_on_failure()
                         
                         continue
                     
@@ -1170,6 +1337,10 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             debug_log("非流式处理错误", error=str(e))
             retry_count += 1
             last_error = str(e)
+            
+            # 网络连接错误时尝试切换代理（仅限 failover 策略）
+            if _proxy_list and "connect" in str(e).lower():
+                await switch_proxy_on_failure()
             
             if retry_count > settings.MAX_RETRIES:
                 raise HTTPException(
