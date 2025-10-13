@@ -108,7 +108,9 @@ def generate_signature(
     
     Layer1: derived_key = HMAC(secret, window_index)
     Layer2: signature = HMAC(derived_key, canonical_string)
-    canonical_string = "requestId,<id>,timestamp,<ts>,user_id,<uid>|<msg>|<ts>"
+    canonical_string = "requestId,<id>,timestamp,<ts>,user_id,<uid>|base64(<msg>)|<ts>"
+    
+    ⚠️ 关键更新：消息文本需要先base64编码！
     
     Args:
         message_text: 最近一次user content
@@ -120,11 +122,18 @@ def generate_signature(
     Returns:
         签名字符串
     """
+    import base64
+    
     # 处理空值
     t = message_text or ""
     r = str(timestamp_ms)
     e = f"requestId,{request_id},timestamp,{timestamp_ms},user_id,{user_id}"
-    i = f"{e}|{t}|{r}"
+    
+    # ⚠️ 关键修复：消息需要base64编码
+    t_encoded = base64.b64encode(t.encode("utf-8")).decode("utf-8")
+    
+    # 构建canonical string（使用base64编码的消息）
+    i = f"{e}|{t_encoded}|{r}"
     
     # 时间窗口索引（5分钟为一个窗口）
     window_index = timestamp_ms // (5 * 60 * 1000)
@@ -147,6 +156,8 @@ def zs(e: str, t: str, timestamp: int, secret: str = None) -> Dict[str, str]:
     """
     生成Z.AI API签名（兼容旧版接口）
     
+    ⚠️ 关键更新：消息文本需要先base64编码！
+    
     Args:
         e: 签名字符串，格式为 "requestId,{requestId},timestamp,{timestamp},user_id,{user_id}"
         t: 最近一次user content
@@ -156,10 +167,17 @@ def zs(e: str, t: str, timestamp: int, secret: str = None) -> Dict[str, str]:
     Returns:
         包含签名和时间戳的字典
     """
+    import base64
+    
     # 处理空值
     t = t or ""
     r = str(timestamp)
-    i = f"{e}|{t}|{r}"
+    
+    # ⚠️ 关键修复：消息需要base64编码
+    t_encoded = base64.b64encode(t.encode("utf-8")).decode("utf-8")
+    
+    # 构建canonical string（使用base64编码的消息）
+    i = f"{e}|{t_encoded}|{r}"
     
     # 时间窗口索引
     n = timestamp // (5 * 60 * 1000)

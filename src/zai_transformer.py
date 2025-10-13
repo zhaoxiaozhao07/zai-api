@@ -565,6 +565,13 @@ class ZAITransformer:
         timestamp = int(time.time() * 1000)
         request_id = generate_uuid()
         
+        # 提取最后一条用户消息内容（用于签名和请求体）
+        with perf_timer("extract_user_content", threshold_ms=5):
+            user_content = self._extract_last_user_content(messages)
+        
+        # 将用户内容添加到请求体中（新要求）
+        body["signature_prompt"] = user_content
+        
         # 使用缓存的header模板生成headers（性能优化）
         with perf_timer("generate_headers", threshold_ms=5):
             dynamic_headers = await get_dynamic_headers(chat_id)
@@ -585,10 +592,6 @@ class ZAITransformer:
         
         # 生成Z.AI签名
         try:
-            # 提取最后一条用户消息内容
-            with perf_timer("extract_user_content", threshold_ms=5):
-                user_content = self._extract_last_user_content(messages)
-            
             # 使用SignatureGenerator生成签名
             with perf_timer("generate_signature", threshold_ms=10):
                 signature_result = self.signature_generator.generate(token, request_id, timestamp, user_content)
