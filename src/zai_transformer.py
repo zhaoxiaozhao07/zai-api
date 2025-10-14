@@ -262,8 +262,9 @@ class ZAITransformer:
         """初始化转换器"""
         self.name = "zai"
         self.base_url = "https://chat.z.ai"
-        self.api_url = settings.API_ENDPOINT
-        
+        # 不再在初始化时固定api_url，而是在transform_request_in中动态获取
+        # self.api_url = settings.API_ENDPOINT
+
         # 使用统一配置的模型映射
         self.model_mapping = MODEL_MAPPING
         
@@ -423,8 +424,18 @@ class ZAITransformer:
         return user_content
 
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
-    async def transform_request_in(self, request: Dict[str, Any], client=None) -> Dict[str, Any]:
-        """转换OpenAI请求为z.ai格式"""
+    async def transform_request_in(self, request: Dict[str, Any], client=None, upstream_url: str = None) -> Dict[str, Any]:
+        """
+        转换OpenAI请求为z.ai格式
+
+        Args:
+            request: OpenAI格式的请求
+            client: HTTP客户端（用于图像上传和Token获取）
+            upstream_url: 上游API地址（如果为None则使用默认配置）
+
+        Returns:
+            转换后的请求字典
+        """
         info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
         # 获取认证令牌（传入client用于匿名Token获取）
@@ -597,17 +608,21 @@ class ZAITransformer:
             with perf_timer("generate_signature", threshold_ms=10):
                 signature_result = self.signature_generator.generate(token, request_id, timestamp, user_content)
                 signature = signature_result["signature"]
-            
+
             # 添加签名到headers
             dynamic_headers["X-Signature"] = signature
             query_params["signature_timestamp"] = str(timestamp)
-            
+
             debug_log("  Z.AI签名已生成并添加到请求中")
         except Exception as e:
             error_log(f"生成Z.AI签名失败: {e}")
-        
+
+        # 使用传入的上游URL或默认配置
+        api_url = upstream_url if upstream_url else settings.API_ENDPOINT
+        debug_log(f"  使用上游地址: {api_url}")
+
         # 构建完整的URL
-        url_with_params = f"{self.api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
+        url_with_params = f"{api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
 
         headers = {
             **dynamic_headers,

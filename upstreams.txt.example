@@ -1,0 +1,17 @@
+# 上游API地址列表配置文件
+# 每行一个地址，支持注释（以#开头的行会被忽略）
+# 系统会自动与环境变量API_ENDPOINT中的地址合并去重
+
+# 主上游地址
+https://chat.z.ai/api/chat/completions
+
+# 备用上游地址（示例，请根据实际情况修改）
+# https://backup.z.ai/api/chat/completions
+# https://deno.com/api/chat/completions
+
+# 使用说明：
+# 1. 复制此文件为 upstreams.txt
+# 2. 取消注释并填写您的上游地址
+# 3. 在 .env 文件中设置 UPSTREAM_STRATEGY=round-robin 或 failover
+# 4. 重启服务即可生效
+
