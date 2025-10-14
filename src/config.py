@@ -43,15 +43,15 @@ def _load_proxy_list() -> list:
                 file_proxies = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
                 proxy_set.update(file_proxies)
                 if file_proxies:
-                    print(f"[PROXY] 从proxys.txt加载了 {len(file_proxies)} 个代理")
+                    print(f"[INFO] 从proxys.txt加载了 {len(file_proxies)} 个代理")
         except Exception as e:
-            print(f"[WARN] 读取proxys.txt失败: {e}")
+            print(f"[ERROR] 读取proxys.txt失败: {e}")
     
     # 去重后的代理列表
     proxy_list = list(proxy_set)
     
     if proxy_list:
-        print(f"[OK] 代理池初始化完成，共 {len(proxy_list)} 个唯一代理")
+        print(f"[INFO] 代理池初始化完成，共 {len(proxy_list)} 个唯一代理")
         # for i, proxy in enumerate(proxy_list, 1):
         #     print(f"  代理 {i}: {proxy}")
     
@@ -86,7 +86,13 @@ class Settings(BaseSettings):
     
     # Server Configuration
     LISTEN_PORT: int = int(os.getenv("LISTEN_PORT", "8080"))
-    DEBUG_LOGGING: bool = os.getenv("DEBUG_LOGGING", "true").lower() == "true"
+    
+    # Logging Configuration - 支持三个等级：false, info, debug
+    _log_level_str: str = os.getenv("LOG_LEVEL", "info").lower()
+    LOG_LEVEL: str = _log_level_str if _log_level_str in ["false", "info", "debug"] else "info"
+    
+    # 向后兼容旧的DEBUG_LOGGING配置
+    DEBUG_LOGGING: bool = LOG_LEVEL == "debug"
     
     # Feature Configuration
     SKIP_AUTH_TOKEN: bool = os.getenv("SKIP_AUTH_TOKEN", "false").lower() == "true"

@@ -26,7 +26,9 @@ ZAI_AUTH_ENDPOINT=https://chat.z.ai/api/v1/auths/
 
 # 服务器配置
 LISTEN_PORT=8080
-DEBUG_LOGGING=false
+
+# 日志级别配置：false（不输出）、info（基本信息）、debug（详细调试信息，包括流式输出）
+LOG_LEVEL=info
 
 
 # 跳过客户端认证（仅开发环境使用）

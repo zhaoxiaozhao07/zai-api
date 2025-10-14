@@ -11,7 +11,7 @@ import httpx
 from typing import Dict, Any, Optional, Tuple
 from io import BytesIO
 
-from .helpers import debug_log
+from .helpers import error_log, info_log, debug_log
 
 
 def is_base64_image(url: str) -> bool:
@@ -104,7 +104,7 @@ async def download_image_from_url(url: str) -> Tuple[bytes, str, str]:
             return image_bytes, content_type, extension
     
     except Exception as e:
-        debug_log(f"从URL下载图像失败: {e}", url=url[:100])
+        error_log(f"从URL下载图像失败: {e}", url=url[:100])
         raise
 
 
@@ -142,7 +142,7 @@ async def upload_image_to_zai(
         }
         
         # 上传文件
-        debug_log("开始上传图像到Z.AI", filename=filename, size=len(image_bytes))
+        info_log("开始上传图像到Z.AI", filename=filename, size=len(image_bytes))
         
         response = await client.post(
             "https://chat.z.ai/api/v1/files/",
@@ -154,7 +154,7 @@ async def upload_image_to_zai(
         response.raise_for_status()
         file_data = response.json()
         
-        debug_log(
+        info_log(
             "图像上传成功",
             file_id=file_data.get("id"),
             filename=file_data.get("filename"),
@@ -164,7 +164,7 @@ async def upload_image_to_zai(
         return file_data
     
     except Exception as e:
-        debug_log(f"上传图像到Z.AI失败: {e}")
+        error_log(f"上传图像到Z.AI失败: {e}")
         raise
 
 
@@ -239,6 +239,6 @@ async def process_image_content(
         return format_file_for_zai_request(file_data)
     
     except Exception as e:
-        debug_log(f"处理图像内容失败: {e}", image_url=image_url[:100])
+        error_log(f"处理图像内容失败: {e}", image_url=image_url[:100])
         return None
 

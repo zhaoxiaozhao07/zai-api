@@ -13,7 +13,7 @@ from typing import Optional, Dict
 
 from .config import settings
 from .schemas import OpenAIRequest, ModelsResponse, Model
-from .helpers import debug_log, get_logger, perf_timer
+from .helpers import error_log, info_log, debug_log, get_logger, perf_timer
 from .zai_transformer import ZAITransformer
 from .toolify_handler import should_enable_toolify, prepare_toolify_request, parse_toolify_response
 from .toolify.detector import StreamingFunctionCallDetector
@@ -36,10 +36,10 @@ try:
             return orjson.loads(s)
     
     json_lib = JSONEncoder()
-    debug_log("✅ 使用 orjson 进行 JSON 序列化/反序列化（性能优化）")
+    info_log("✅ 使用 orjson 进行 JSON 序列化/反序列化（性能优化）")
 except ImportError:
     json_lib = json
-    debug_log("⚠️ orjson 未安装，使用标准 json 库")
+    info_log("⚠️ orjson 未安装，使用标准 json 库")
 
 router = APIRouter()
 
@@ -87,13 +87,13 @@ async def get_or_create_client(proxy_url: Optional[str] = None) -> httpx.AsyncCl
         # 直连情况
         if proxy_url is None:
             if _default_client is None:
-                debug_log("[CLIENT] 创建默认客户端（无代理）")
+                info_log("[CLIENT] 创建默认客户端（无代理）")
                 _default_client = httpx.AsyncClient(**CONNECTION_POOL_CONFIG)
             return _default_client
         
         # 代理情况
         if proxy_url not in _proxy_clients:
-            debug_log(f"[CLIENT] 为代理创建新客户端: {proxy_url}")
+            info_log(f"[CLIENT] 为代理创建新客户端: {proxy_url}")
             _proxy_clients[proxy_url] = httpx.AsyncClient(
                 proxy=proxy_url,
                 **CONNECTION_POOL_CONFIG
@@ -107,17 +107,17 @@ async def cleanup_clients():
     
     # 关闭所有代理客户端
     for proxy_url, client in _proxy_clients.items():
-        debug_log(f"[CLIENT] 关闭代理客户端: {proxy_url}")
+        info_log(f"[CLIENT] 关闭代理客户端: {proxy_url}")
         await client.aclose()
     _proxy_clients.clear()
     
     # 关闭默认客户端
     if _default_client:
-        debug_log("[CLIENT] 关闭默认客户端")
+        info_log("[CLIENT] 关闭默认客户端")
         await _default_client.aclose()
         _default_client = None
     
-    debug_log("[CLIENT] 所有客户端已清理")
+    info_log("[CLIENT] 所有客户端已清理")
 
 # ================== 代理池管理 ==================
 _proxy_list = []  # 代理列表
@@ -132,13 +132,13 @@ def init_proxy_pool():
     _proxy_list = settings.PROXY_LIST
     
     if _proxy_list:
-        debug_log(f"[PROXY] 初始化代理池，共 {len(_proxy_list)} 个代理，策略: {settings.PROXY_STRATEGY}")
+        info_log(f"[PROXY] 初始化代理池，共 {len(_proxy_list)} 个代理，策略: {settings.PROXY_STRATEGY}")
         # for i, proxy in enumerate(_proxy_list):
         #     debug_log(f"  代理 {i+1}: {proxy}")
 
-def get_next_proxy() -> Optional[str]:
+async def get_next_proxy() -> Optional[str]:
     """
-    获取下一个代理（根据策略）
+    获取下一个代理（根据策略）- 并发安全版本
     
     Returns:
         Optional[str]: 代理地址，如果没有可用代理则返回 None
@@ -149,15 +149,16 @@ def get_next_proxy() -> Optional[str]:
         return None
     
     if settings.PROXY_STRATEGY == "round-robin":
-        # 轮询策略：每次调用都切换到下一个代理
-        proxy = _proxy_list[_proxy_index]
-        _proxy_index = (_proxy_index + 1) % len(_proxy_list)
-        debug_log(f"[PROXY] Round-robin选择代理 {_proxy_index}: {proxy}")
-        return proxy
+        # 轮询策略：每次调用都切换到下一个代理（使用锁保护并发安全）
+        async with _proxy_lock:
+            proxy = _proxy_list[_proxy_index]
+            _proxy_index = (_proxy_index + 1) % len(_proxy_list)
+            debug_log(f"[PROXY] Round-robin选择代理 #{_proxy_index}: {proxy}")
+            return proxy
     else:
-        # failover 策略：始终使用当前索引的代理
+        # failover 策略：始终使用当前索引的代理（读取不需要锁）
         proxy = _proxy_list[_proxy_index]
-        debug_log(f"[PROXY] Failover使用代理 {_proxy_index}: {proxy}")
+        debug_log(f"[PROXY] Failover使用代理 #{_proxy_index}: {proxy}")
         return proxy
 
 async def switch_proxy_on_failure():
@@ -172,7 +173,7 @@ async def switch_proxy_on_failure():
     async with _proxy_lock:
         old_index = _proxy_index
         _proxy_index = (_proxy_index + 1) % len(_proxy_list)
-        debug_log(f"[PROXY] 代理失败，从 {old_index} 切换到 {_proxy_index}: {_proxy_list[_proxy_index]}")
+        info_log(f"[PROXY] 代理失败，从 #{old_index} 切换到 #{_proxy_index}: {_proxy_list[_proxy_index]}")
 
 # 初始化代理池
 init_proxy_pool()
@@ -185,8 +186,8 @@ async def get_request_client() -> httpx.AsyncClient:
     Returns:
         httpx.AsyncClient: 复用的HTTP客户端
     """
-    # 获取当前应该使用的代理
-    proxy = get_next_proxy()
+    # 获取当前应该使用的代理（并发安全）
+    proxy = await get_next_proxy()
     
     # 获取或创建对应的客户端
     return await get_or_create_client(proxy)
@@ -211,12 +212,12 @@ def calculate_backoff_delay(retry_count: int, status_code: int = None, base_dela
     # 针对不同错误类型调整延迟
     if status_code == 429:  # Rate limit - 更长的退避时间
         linear_delay *= 1.5  # 1.5倍延迟
-        debug_log("[BACKOFF] 检测到429限流错误，使用更长退避时间")
+        info_log("[BACKOFF] 检测到429限流错误，使用更长退避时间")
     elif status_code in [502, 503, 504]:  # 服务端错误 - 适中延迟
         linear_delay *= 1.2  # 1.2倍延迟
-        debug_log("[BACKOFF] 检测到服务端错误，使用适中退避时间")
+        info_log("[BACKOFF] 检测到服务端错误，使用适中退避时间")
     elif status_code in [400, 401, 405]:  # 认证/请求错误 - 标准延迟
-        debug_log(f"[BACKOFF] 检测到{status_code}认证/请求错误，使用标准退避时间")
+        info_log(f"[BACKOFF] 检测到{status_code}认证/请求错误，使用标准退避时间")
     
     # 限制最大延迟
     linear_delay = min(linear_delay, max_delay)
@@ -262,7 +263,7 @@ async def list_models():
 async def chat_completions(request: OpenAIRequest, authorization: str = Header(...)):
     """Handle chat completion requests with ZAI transformer - 支持流式和非流式以及工具调用"""
     role = request.messages[0].role if request.messages else "unknown"
-    debug_log(
+    info_log(
         "收到客户端请求",
         model=request.model,
         stream=request.stream,
@@ -298,7 +299,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         
         # 如果启用工具调用，预处理消息并注入提示词
         if enable_toolify:
-            debug_log("[TOOLIFY] 工具调用功能已启用")
+            info_log("[TOOLIFY] 工具调用功能已启用")
             messages, _ = prepare_toolify_request(request_dict, messages)
             # 从请求中移除 tools 和 tool_choice（已转换为提示词）
             request_dict_for_transform = request_dict.copy()
@@ -308,14 +309,14 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         else:
             request_dict_for_transform = request_dict
         
-        debug_log("开始转换请求格式: OpenAI -> Z.AI")
+        info_log("开始转换请求格式: OpenAI -> Z.AI")
         
         # 初始转换（传入request_client用于图像上传和Token获取）
         transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
         
         # 根据stream参数决定返回流式或非流式响应
         if not request.stream:
-            debug_log("使用非流式模式")
+            info_log("使用非流式模式")
             result = await handle_non_stream_request(request, transformed, enable_toolify, request_client)
             return result
 
@@ -345,7 +346,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                             retry_count=retry_count,
                             status_code=last_status_code
                         )
-                        debug_log(
+                        info_log(
                             f"[RETRY] 重试请求 ({retry_count}/{settings.MAX_RETRIES})",
                             retry_count=retry_count,
                             max_retries=settings.MAX_RETRIES,
@@ -375,7 +376,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         if response.status_code != 200:
                             error_text = await response.aread()
                             error_msg = error_text.decode('utf-8', errors='ignore')
-                            debug_log(
+                            error_log(
                                 "上游返回错误",
                                 status_code=response.status_code,
                                 error_detail=error_msg[:200]
@@ -397,13 +398,13 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                 
                                 if is_anonymous:
                                     # 匿名Token：任何错误都清理缓存并重新获取
-                                    debug_log(f"[ANONYMOUS] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
+                                    info_log(f"[ANONYMOUS] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
                                     await transformer.clear_anonymous_token_cache()
                                     # 刷新header模板
-                                    debug_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
+                                    info_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
                                     await transformer.refresh_header_template()
                                     # 清理客户端缓存，强制下次重新创建（匿名Token可能导致连接状态异常）
-                                    debug_log("[CLIENT] 清理HTTP客户端缓存，下次请求将创建新客户端")
+                                    info_log("[CLIENT] 清理HTTP客户端缓存，下次请求将创建新客户端")
                                     await cleanup_clients()
                                     
                                     # 重新获取客户端
@@ -411,15 +412,15 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     
                                     # 使用新的匿名Token重新生成请求
                                     transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
-                                    debug_log("[OK] 已获取新的匿名Token并重新生成请求")
+                                    info_log("[OK] 已获取新的匿名Token并重新生成请求")
                                 else:
                                     # 配置Token：按原有逻辑处理
                                     if response.status_code in [400, 401, 405]:
-                                        debug_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
+                                        info_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
                                         new_token = await transformer.switch_token()
                                         await transformer.refresh_header_template()
                                         transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
-                                        debug_log(f"[OK] 已切换到下一个配置Token")
+                                        info_log(f"[OK] 已切换到下一个配置Token")
                                     
                                     # 网络错误时尝试切换代理（仅限 failover 策略）
                                     if response.status_code in [502, 503, 504] and _proxy_list:
@@ -440,7 +441,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                             return
 
                         # 200 成功，处理响应
-                        debug_log("Z.AI 响应成功，开始处理 SSE 流", status="success")
+                        info_log("Z.AI 响应成功，开始处理 SSE 流", status="success")
 
                         # 处理状态
                         has_thinking = False
@@ -530,7 +531,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         for chunk in tool_chunks:
                                                             yield chunk
                                                         # 检测到工具调用后提前结束
-                                                        debug_log("[REQUEST] 流式响应（早期工具调用检测）完成")
+                                                        info_log("[REQUEST] 流式响应（早期工具调用检测）完成")
                                                         return
                                                     else:
                                                         debug_log("[TOOLIFY] finalize()未检测到工具调用")
@@ -945,7 +946,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                 for chunk in tool_chunks:
                                     yield chunk
                                 # 流式响应完成
-                                debug_log("[REQUEST] 流式响应（工具调用）完成")
+                                info_log("[REQUEST] 流式响应（工具调用）完成")
                                 return
                         
                         debug_log("[SSE] 流自然结束 - 没有工具调用，输出finish chunk")
@@ -971,11 +972,11 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         yield f"data: {json_lib.dumps(finish_chunk)}\n\n"
                         yield "data: [DONE]\n\n"
                         # 流式响应正常完成
-                        debug_log("[REQUEST] 流式响应完成")
+                        info_log("[REQUEST] 流式响应完成")
                         return
 
                 except Exception as e:
-                    debug_log("流处理错误", error=str(e))
+                    error_log("流处理错误", error=str(e))
                     retry_count += 1
                     last_error = str(e)
                     
@@ -993,7 +994,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         yield f"data: {json_lib.dumps(error_response)}\n\n"
                         yield "data: [DONE]\n\n"
                         # 流式响应错误完成
-                        debug_log("[REQUEST] 流式响应错误")
+                        error_log("[REQUEST] 流式响应错误")
                         return
 
         return StreamingResponse(
@@ -1006,11 +1007,11 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         )
 
     except HTTPException:
-        debug_log("[REQUEST] 处理HTTPException")
+        error_log("[REQUEST] 处理HTTPException")
         raise
     except Exception as e:
-        debug_log("处理请求时发生错误", error=str(e))
-        debug_log("[REQUEST] 处理异常")
+        error_log("处理请求时发生错误", error=str(e))
+        error_log("[REQUEST] 处理异常")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
@@ -1079,7 +1080,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                     retry_count=retry_count,
                     status_code=last_status_code
                 )
-                debug_log(
+                info_log(
                     f"[RETRY] 非流式请求重试 ({retry_count}/{settings.MAX_RETRIES})",
                     retry_count=retry_count,
                     delay=f"{delay:.2f}s"
@@ -1110,7 +1111,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                 if response.status_code != 200:
                     error_text = await response.aread()
                     error_msg = error_text.decode('utf-8', errors='ignore')
-                    debug_log(
+                    error_log(
                         "上游返回错误",
                         status_code=response.status_code,
                         error_detail=error_msg[:200]
@@ -1131,13 +1132,13 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                         
                         if is_anonymous:
                             # 匿名Token：任何错误都清理缓存并重新获取
-                            debug_log(f"[ANONYMOUS-NONSTREAM] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
+                            info_log(f"[ANONYMOUS-NONSTREAM] 检测到匿名Token错误 {response.status_code}，清理缓存并重新获取")
                             await transformer.clear_anonymous_token_cache()
                             # 刷新header模板
-                            debug_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
+                            info_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
                             await transformer.refresh_header_template()
                             # 清理客户端缓存，强制下次重新创建
-                            debug_log("[CLIENT-NONSTREAM] 清理HTTP客户端缓存，下次请求将创建新客户端")
+                            info_log("[CLIENT-NONSTREAM] 清理HTTP客户端缓存，下次请求将创建新客户端")
                             await cleanup_clients()
                             
                             # 重新获取客户端
@@ -1150,16 +1151,16 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             # 使用新的匿名Token重新生成请求
                             request_dict = request.model_dump()
                             transformed = await transformer.transform_request_in(request_dict, client=client)
-                            debug_log("[OK-NONSTREAM] 已获取新的匿名Token并重新生成请求")
+                            info_log("[OK-NONSTREAM] 已获取新的匿名Token并重新生成请求")
                         else:
                             # 配置Token：按原有逻辑处理
                             if response.status_code in [400, 401, 405]:
-                                debug_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
+                                info_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
                                 new_token = await transformer.switch_token()
                                 await transformer.refresh_header_template()
                                 request_dict = request.model_dump()
                                 transformed = await transformer.transform_request_in(request_dict, client=client)
-                                debug_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
+                                info_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
                             
                             # 网络错误时尝试切换代理（仅限 failover 策略）
                             if response.status_code in [502, 503, 504] and _proxy_list:
@@ -1174,7 +1175,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                     )
                 
                 # 200 成功，聚合SSE流数据
-                debug_log("Z.AI 响应成功，开始聚合非流式数据", status="success")
+                info_log("Z.AI 响应成功，开始聚合非流式数据", status="success")
                 
                 # 重置聚合变量
                 final_content = ""
@@ -1298,7 +1299,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                     debug_log("[TOOLIFY] 检查非流式响应中的工具调用")
                     tool_response = parse_toolify_response(final_content, request.model)
                     if tool_response:
-                        debug_log("[TOOLIFY] 非流式响应中检测到工具调用")
+                        info_log("[TOOLIFY] 非流式响应中检测到工具调用")
                         # 返回包含tool_calls的响应
                         return {
                             "id": transformed["body"]["chat_id"],
@@ -1315,7 +1316,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             "usage": usage_info
                         }
                 
-                debug_log(
+                info_log(
                     "非流式响应聚合完成",
                     content_length=len(final_content),
                     reasoning_length=len(reasoning_content),
@@ -1334,7 +1335,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
         except HTTPException:
             raise
         except Exception as e:
-            debug_log("非流式处理错误", error=str(e))
+            error_log("非流式处理错误", error=str(e))
             retry_count += 1
             last_error = str(e)
             

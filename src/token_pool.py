@@ -11,7 +11,7 @@ import random
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timedelta
-from .helpers import debug_log
+from .helpers import error_log, info_log, debug_log
 from .config import settings
 
 
@@ -97,13 +97,13 @@ class TokenPool:
         # 1. 从环境变量ZAI_TOKEN加载（现在是可选的）
         zai_token = os.getenv("ZAI_TOKEN", "").strip()
         if not zai_token:
-            debug_log("[INFO] 未配置ZAI_TOKEN，将启用匿名Token模式")
+            info_log("[INFO] 未配置ZAI_TOKEN，将启用匿名Token模式")
             self.anonymous_mode = True
         else:
             # 处理多个token（逗号分割）
             env_tokens = [token.strip() for token in zai_token.split(",") if token.strip()]
             token_set.update(env_tokens)
-            debug_log(f"从环境变量ZAI_TOKEN加载了 {len(env_tokens)} 个token")
+            info_log(f"从环境变量ZAI_TOKEN加载了 {len(env_tokens)} 个token")
         
         # 2. 从tokens.txt加载（可选）
         tokens_file = Path("tokens.txt")
@@ -113,11 +113,11 @@ class TokenPool:
                     file_tokens = [line.strip() for line in f if line.strip()]
                     file_tokens_count = len(file_tokens)
                     token_set.update(file_tokens)
-                    debug_log(f"从tokens.txt加载了 {file_tokens_count} 个token")
+                    info_log(f"从tokens.txt加载了 {file_tokens_count} 个token")
             except Exception as e:
-                debug_log(f"[WARN] 读取tokens.txt失败: {e}")
+                error_log(f"[WARN] 读取tokens.txt失败: {e}")
         else:
-            debug_log("tokens.txt文件不存在，跳过加载")
+            info_log("tokens.txt文件不存在，跳过加载")
         
         # 去重后的token列表
         self.tokens = list(token_set)
@@ -127,11 +127,11 @@ class TokenPool:
             self.current_token = self.tokens[0]
             self.current_index = 0
             self.anonymous_mode = False
-            debug_log(f"[OK] Token池初始化完成，共 {len(self.tokens)} 个唯一token")
+            info_log(f"[OK] Token池初始化完成，共 {len(self.tokens)} 个唯一token")
         else:
             # 没有配置token，启用匿名模式
             self.anonymous_mode = True
-            debug_log("[INFO] Token池为空，启用纯匿名Token模式")
+            info_log("[INFO] Token池为空，启用纯匿名Token模式")
     
     async def _fetch_anonymous_token(self, http_client=None) -> Optional[str]:
         """
@@ -144,7 +144,7 @@ class TokenPool:
             Optional[str]: 匿名Token，失败返回None
         """
         if not settings.ENABLE_GUEST_TOKEN:
-            debug_log("[WARN] 匿名Token功能已禁用（ENABLE_GUEST_TOKEN=false）")
+            info_log("[WARN] 匿名Token功能已禁用（ENABLE_GUEST_TOKEN=false）")
             return None
         
         max_retries = 3
@@ -174,11 +174,11 @@ class TokenPool:
                         data = response.json()
                         token = data.get("token", "")
                         if token:
-                            debug_log(f"[OK] 成功获取匿名Token: {token[:20]}...")
+                            info_log(f"[OK] 成功获取匿名Token: {token[:20]}...")
                             return token
                     else:
                         last_status_code = response.status_code
-                        debug_log(f"[WARN] 获取匿名Token失败，状态码: {response.status_code}")
+                        error_log(f"[WARN] 获取匿名Token失败，状态码: {response.status_code}")
                         
                 finally:
                     # 如果是临时创建的客户端，需要关闭
@@ -186,7 +186,7 @@ class TokenPool:
                         await client.aclose()
                         
             except Exception as e:
-                debug_log(f"[ERROR] 获取匿名Token异常 (尝试 {attempt + 1}/{max_retries}): {e}")
+                error_log(f"[ERROR] 获取匿名Token异常 (尝试 {attempt + 1}/{max_retries}): {e}")
             
             # 智能退避重试策略
             if attempt < max_retries - 1:
@@ -200,7 +200,7 @@ class TokenPool:
                 await asyncio.sleep(final_delay)
         
         # 全部失败
-        debug_log("[ERROR] 匿名Token获取失败")
+        error_log("[ERROR] 匿名Token获取失败")
         return None
     
     async def _get_cached_anonymous_token(self) -> Optional[str]:
@@ -254,7 +254,7 @@ class TokenPool:
                 return cached_token
             
             # 获取新的匿名Token
-            debug_log("[FETCH] 开始获取新的匿名Token...")
+            info_log("[FETCH] 开始获取新的匿名Token...")
             new_token = await self._fetch_anonymous_token(http_client)
             
             if new_token:
@@ -262,7 +262,7 @@ class TokenPool:
                 return new_token
             else:
                 # 获取失败，直接返回None
-                debug_log("[ERROR] 无法获取匿名Token")
+                error_log("[ERROR] 无法获取匿名Token")
                 return None
     
     async def clear_anonymous_token_cache(self):
@@ -298,7 +298,7 @@ class TokenPool:
         
         # 策略2: 没有配置Token或Token失效，使用匿名Token
         if settings.ENABLE_GUEST_TOKEN:
-            debug_log("[TOKEN] 配置Token不可用，尝试获取匿名Token...")
+            info_log("[TOKEN] 配置Token不可用，尝试获取匿名Token...")
             anonymous_token = await self.get_anonymous_token(http_client)
             if anonymous_token:
                 return anonymous_token
@@ -317,14 +317,14 @@ class TokenPool:
         """
         async with self._switch_lock:  # 使用异步锁保护，确保原子操作
             if len(self.tokens) <= 1:
-                debug_log("[WARN] 只有一个token，无法切换")
+                info_log("[WARN] 只有一个token，无法切换")
                 return self.current_token if self.current_token else ""
             
             # 原子操作：切换到下一个token
             self.current_index = (self.current_index + 1) % len(self.tokens)
             self.current_token = self.tokens[self.current_index]
             
-            debug_log(f"[SWITCH] 切换到下一个token (索引: {self.current_index}/{len(self.tokens)}): {self.current_token[:20]}...")
+            info_log(f"[SWITCH] 切换到下一个token (索引: {self.current_index}/{len(self.tokens)}): {self.current_token[:20]}...")
             return self.current_token
     
     async def switch_to_anonymous(self, http_client=None) -> Optional[str]:
@@ -337,7 +337,7 @@ class TokenPool:
         Returns:
             Optional[str]: 匿名Token
         """
-        debug_log("[SWITCH] 切换到匿名Token模式")
+        info_log("[SWITCH] 切换到匿名Token模式")
         return await self.get_anonymous_token(http_client)
     
     def get_pool_size(self) -> int:
@@ -387,7 +387,7 @@ class TokenPool:
     
     async def reload(self):
         """重新加载token池"""
-        debug_log("[RELOAD] 重新加载token池")
+        info_log("[RELOAD] 重新加载token池")
         async with self._switch_lock:  # 重新加载时也需要异步锁
             self._load_tokens()
 

@@ -23,19 +23,23 @@ def configure_structlog():
         structlog.processors.format_exc_info,
     ]
     
-    # 根据调试模式选择渲染器
-    if settings.DEBUG_LOGGING:
-        # 开发模式：使用彩色控制台输出
+    # 根据日志级别选择渲染器
+    if settings.LOG_LEVEL == "debug":
+        # 调试模式：使用彩色控制台输出
         processors.append(structlog.dev.ConsoleRenderer())
-    else:
-        # 生产模式：使用JSON格式输出
+        log_level = logging.DEBUG
+    elif settings.LOG_LEVEL == "info":
+        # 信息模式：使用彩色控制台输出
+        processors.append(structlog.dev.ConsoleRenderer())
+        log_level = logging.INFO
+    else:  # false
+        # 禁用模式：使用JSON格式输出（但实际不会输出）
         processors.append(structlog.processors.JSONRenderer())
+        log_level = logging.CRITICAL  # 只输出致命错误
     
     structlog.configure(
         processors=processors,
-        wrapper_class=structlog.make_filtering_bound_logger(
-            logging.DEBUG if settings.DEBUG_LOGGING else logging.INFO
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
         logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
         cache_logger_on_first_use=True,
@@ -49,23 +53,62 @@ configure_structlog()
 _logger = structlog.get_logger()
 
 
-def debug_log(message: str, *args, **kwargs) -> None:
+def error_log(message: str, *args, **kwargs) -> None:
     """
-    结构化日志记录函数，支持额外的上下文信息
+    错误日志记录函数（所有级别都输出）
     
     Args:
         message: 日志消息
         *args: 消息格式化参数（兼容旧版）
         **kwargs: 额外的结构化上下文字段
     """
-    if settings.DEBUG_LOGGING:
+    # 格式化消息（兼容旧版用法）
+    if args:
+        formatted_message = message % args
+    else:
+        formatted_message = message
+    
+    # 使用structlog记录错误日志
+    _logger.error(formatted_message, **kwargs)
+
+
+def info_log(message: str, *args, **kwargs) -> None:
+    """
+    信息日志记录函数（info和debug级别输出）
+    
+    Args:
+        message: 日志消息
+        *args: 消息格式化参数（兼容旧版）
+        **kwargs: 额外的结构化上下文字段
+    """
+    if settings.LOG_LEVEL in ["info", "debug"]:
         # 格式化消息（兼容旧版用法）
         if args:
             formatted_message = message % args
         else:
             formatted_message = message
         
-        # 使用structlog记录日志
+        # 使用structlog记录信息日志
+        _logger.info(formatted_message, **kwargs)
+
+
+def debug_log(message: str, *args, **kwargs) -> None:
+    """
+    调试日志记录函数（仅debug级别输出）
+    
+    Args:
+        message: 日志消息
+        *args: 消息格式化参数（兼容旧版）
+        **kwargs: 额外的结构化上下文字段
+    """
+    if settings.LOG_LEVEL == "debug":
+        # 格式化消息（兼容旧版用法）
+        if args:
+            formatted_message = message % args
+        else:
+            formatted_message = message
+        
+        # 使用structlog记录调试日志
         _logger.debug(formatted_message, **kwargs)
 
 

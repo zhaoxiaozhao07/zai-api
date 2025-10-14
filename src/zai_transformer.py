@@ -18,7 +18,7 @@ from browserforge.headers import HeaderGenerator
 from fastapi import HTTPException
 
 from .config import settings, MODEL_MAPPING
-from .helpers import debug_log, perf_timer, perf_track
+from .helpers import error_log, info_log, debug_log, perf_timer, perf_track
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
 from .image_handler import process_image_content
@@ -144,7 +144,7 @@ async def get_header_template() -> Dict[str, str]:
         base_headers["Connection"] = "keep-alive"
         
         _header_template_cache = base_headers
-        debug_log("✅ Header模板已缓存", 
+        info_log("✅ Header模板已缓存", 
                   user_agent=base_headers.get("User-Agent", "")[:50],
                   has_sec_ch_ua=("sec-ch-ua" in base_headers or "Sec-Ch-Ua" in base_headers))
     
@@ -158,7 +158,7 @@ async def clear_header_template():
     global _header_template_cache
     async with _header_cache_lock:
         _header_template_cache = None
-        debug_log("🔄 Header模板缓存已清除")
+        info_log("🔄 Header模板缓存已清除")
 
 
 async def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
@@ -312,7 +312,7 @@ class ZAITransformer:
     async def refresh_header_template(self):
         """刷新header模板（清除缓存并重新生成）"""
         await clear_header_template()
-        debug_log("🔄 Header模板已刷新，下次请求将使用新的header")
+        info_log("🔄 Header模板已刷新，下次请求将使用新的header")
     
     def _has_image_content(self, messages: List[Dict]) -> bool:
         """
@@ -424,7 +424,7 @@ class ZAITransformer:
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
     async def transform_request_in(self, request: Dict[str, Any], client=None) -> Dict[str, Any]:
         """转换OpenAI请求为z.ai格式"""
-        debug_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
+        info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
         # 获取认证令牌（传入client用于匿名Token获取）
         token = await self.get_token(http_client=client)
@@ -434,7 +434,7 @@ class ZAITransformer:
         messages = request.get("messages", [])
         
         if token_pool.is_anonymous_token(token) and self._has_image_content(messages):
-            debug_log("[ERROR] 匿名Token尝试使用视觉功能被拒绝")
+            error_log("[ERROR] 匿名Token尝试使用视觉功能被拒绝")
             raise HTTPException(
                 status_code=400,
                 detail="匿名Token不支持图像识别功能，请配置ZAI_TOKEN使用视觉模型。设置环境变量ZAI_TOKEN=your_token后重启服务。"
@@ -477,7 +477,7 @@ class ZAITransformer:
         uploaded_files_map = {}  # 用于GLM-4.5V：原始URL -> 文件信息的映射
         
         if image_urls and client:
-            debug_log(f"检测到 {len(image_urls)} 张图像，开始上传")
+            info_log(f"检测到 {len(image_urls)} 张图像，开始上传")
             for idx, image_url in enumerate(image_urls):
                 try:
                     file_obj = await process_image_content(image_url, token, client)
@@ -488,17 +488,17 @@ class ZAITransformer:
                         else:
                             # 视觉模型：保存映射关系，稍后修改messages中的URL
                             uploaded_files_map[image_url] = file_obj
-                        debug_log(f"图像 [{idx+1}/{len(image_urls)}] 上传成功", file_id=file_obj.get("id"))
+                        info_log(f"图像 [{idx+1}/{len(image_urls)}] 上传成功", file_id=file_obj.get("id"))
                     else:
-                        debug_log(f"图像 [{idx+1}/{len(image_urls)}] 上传失败")
+                        error_log(f"图像 [{idx+1}/{len(image_urls)}] 上传失败")
                 except Exception as e:
-                    debug_log(f"图像 [{idx+1}/{len(image_urls)}] 处理错误: {e}")
+                    error_log(f"图像 [{idx+1}/{len(image_urls)}] 处理错误: {e}")
         elif image_urls:
-            debug_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
+            info_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
         
         # GLM-4.5V特殊处理：修改messages中的图片URL格式
         if is_vision_model and uploaded_files_map:
-            debug_log(f"[GLM-4.5V] 开始修改消息中的图片URL格式")
+            info_log(f"[GLM-4.5V] 开始修改消息中的图片URL格式")
             for msg in messages:
                 if msg.get("role") == "user" and isinstance(msg.get("content"), list):
                     for part in msg["content"]:
@@ -603,7 +603,7 @@ class ZAITransformer:
             
             debug_log("  Z.AI签名已生成并添加到请求中")
         except Exception as e:
-            debug_log(f"生成Z.AI签名失败: {e}")
+            error_log(f"生成Z.AI签名失败: {e}")
         
         # 构建完整的URL
         url_with_params = f"{self.api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
@@ -620,7 +620,7 @@ class ZAITransformer:
             "headers": headers,
         }
 
-        debug_log("请求转换完成")
+        info_log("请求转换完成")
 
         return {
             "body": body,
