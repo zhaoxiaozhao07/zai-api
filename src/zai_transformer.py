@@ -123,7 +123,7 @@ async def get_header_template() -> Dict[str, str]:
         # 设置特定于Z.AI的headers
         base_headers["Origin"] = "https://chat.z.ai"
         base_headers["Content-Type"] = "application/json"
-        base_headers["X-Fe-Version"] = "prod-fe-1.0.97"
+        base_headers["X-Fe-Version"] = "prod-fe-1.0.98"
         
         # 设置Fetch相关headers（用于CORS请求）
         base_headers["Sec-Fetch-Dest"] = "empty"
@@ -273,30 +273,31 @@ class ZAITransformer:
     async def get_token(self, http_client=None) -> str:
         """
         获取Z.AI认证令牌（从token池获取）
-        
+
         Args:
             http_client: 外部传入的HTTP客户端（用于匿名Token获取）
-            
+
         Returns:
             str: 可用的Token
         """
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         token = await token_pool.get_token(http_client=http_client)
-        
-        debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token[:20]}...")
+
+        token_preview = f"{token[:20]}...{token[-20:]}" if len(token) > 40 else token
+        debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token_preview}")
         return token
     
     async def switch_token(self, http_client=None) -> str:
         """
         切换到下一个token（请求失败时调用）
-        
+
         Args:
             http_client: 外部传入的HTTP客户端（如果切换到匿名Token时使用）
-            
+
         Returns:
             str: 下一个Token
         """
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         token = await token_pool.switch_to_next()
         return token
     
@@ -305,7 +306,7 @@ class ZAITransformer:
         清理匿名Token缓存（当Token失效时调用）
         线程安全版本
         """
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         await token_pool.clear_anonymous_token_cache()  # 调用异步版本
         debug_log("[TRANSFORMER] 匿名Token缓存已清理")
     
@@ -428,9 +429,9 @@ class ZAITransformer:
 
         # 获取认证令牌（传入client用于匿名Token获取）
         token = await self.get_token(http_client=client)
-        
+
         # 检查匿名Token是否尝试使用视觉模型
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         messages = request.get("messages", [])
         
         if token_pool.is_anonymous_token(token) and self._has_image_content(messages):
