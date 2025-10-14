@@ -3,12 +3,59 @@ FastAPI application configuration module
 """
 
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from typing import Optional
 from pydantic_settings import BaseSettings
 
 # 加载.env文件,覆盖电脑自身环境变量，哪怕为空也要加载
 load_dotenv(override=True)
+
+
+def _load_proxy_list() -> list:
+    """
+    从环境变量和proxys.txt文件加载代理列表，并去重合并
+    
+    Returns:
+        list: 去重后的代理列表
+    """
+    proxy_set = set()
+    
+    # 1. 从环境变量加载代理（支持HTTP_PROXY和HTTPS_PROXY，优先HTTPS_PROXY）
+    https_proxy_raw = os.getenv("HTTPS_PROXY", "")
+    http_proxy_raw = os.getenv("HTTP_PROXY", "")
+    
+    # 处理HTTPS代理（优先）
+    if https_proxy_raw:
+        env_proxies = [p.strip() for p in https_proxy_raw.split(",") if p.strip()]
+        proxy_set.update(env_proxies)
+    
+    # 处理HTTP代理
+    if http_proxy_raw:
+        env_proxies = [p.strip() for p in http_proxy_raw.split(",") if p.strip()]
+        proxy_set.update(env_proxies)
+    
+    # 2. 从proxys.txt文件加载代理（可选）
+    proxys_file = Path("proxys.txt")
+    if proxys_file.exists():
+        try:
+            with open(proxys_file, 'r', encoding='utf-8') as f:
+                file_proxies = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+                proxy_set.update(file_proxies)
+                if file_proxies:
+                    print(f"[PROXY] 从proxys.txt加载了 {len(file_proxies)} 个代理")
+        except Exception as e:
+            print(f"[WARN] 读取proxys.txt失败: {e}")
+    
+    # 去重后的代理列表
+    proxy_list = list(proxy_set)
+    
+    if proxy_list:
+        print(f"[OK] 代理池初始化完成，共 {len(proxy_list)} 个唯一代理")
+        # for i, proxy in enumerate(proxy_list, 1):
+        #     print(f"  代理 {i}: {proxy}")
+    
+    return proxy_list
 
 
 class Settings(BaseSettings):
@@ -48,17 +95,19 @@ class Settings(BaseSettings):
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
     
     # Proxy Configuration - 代理配置（支持多个代理）
-    # 解析逗号分隔的代理列表
-    _http_proxy_raw = os.getenv("HTTP_PROXY", "")
-    _https_proxy_raw = os.getenv("HTTPS_PROXY", "")
+    # 从环境变量和proxys.txt文件加载代理列表，并去重合并
+    _proxy_list = _load_proxy_list()
     
-    # 将逗号分隔的字符串转换为列表（去除空值）
-    HTTP_PROXY_LIST: list = [p.strip() for p in _http_proxy_raw.split(",") if p.strip()] if _http_proxy_raw else []
-    HTTPS_PROXY_LIST: list = [p.strip() for p in _https_proxy_raw.split(",") if p.strip()] if _https_proxy_raw else []
+    # 统一的代理列表（合并去重后的结果）
+    PROXY_LIST: list = _proxy_list
+    
+    # 为了向后兼容，保留原有的配置方式
+    HTTP_PROXY_LIST: list = _proxy_list
+    HTTPS_PROXY_LIST: list = _proxy_list
     
     # 保留单代理配置的兼容性
-    HTTP_PROXY: Optional[str] = HTTP_PROXY_LIST[0] if HTTP_PROXY_LIST else None
-    HTTPS_PROXY: Optional[str] = HTTPS_PROXY_LIST[0] if HTTPS_PROXY_LIST else None
+    HTTP_PROXY: Optional[str] = _proxy_list[0] if _proxy_list else None
+    HTTPS_PROXY: Optional[str] = _proxy_list[0] if _proxy_list else None
     
     # 代理策略：failover（失败切换）或 round-robin（轮询）
     PROXY_STRATEGY: str = os.getenv("PROXY_STRATEGY", "failover").lower()

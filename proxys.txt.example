@@ -1,0 +1,21 @@
+# 代理配置示例文件
+# 使用时请将此文件复制为 proxys.txt
+# cp proxys.txt.example proxys.txt
+#
+# 格式说明：
+# - 一行一个代理地址
+# - 支持HTTP和HTTPS代理
+# - 支持 # 开头的注释行
+# - 空行会被自动忽略
+# - 系统会自动与环境变量中的代理合并去重
+#
+# 示例代理（请替换为实际的代理地址）：
+# http://proxy1.example.com:8080
+# http://proxy2.example.com:8080
+# https://proxy3.example.com:8443
+# socks5://proxy4.example.com:1080
+#
+# 代理策略配置请在 .env 文件中设置：
+# PROXY_STRATEGY=failover    # 失败切换（默认）
+# PROXY_STRATEGY=round-robin # 轮询负载均衡
+

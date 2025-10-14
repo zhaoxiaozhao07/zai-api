@@ -14,6 +14,8 @@ services:
     volumes:
       # 挂载 tokens.txt 文件（如果需要从文件读取 token）
       - ./tokens.txt:/app/tokens.txt:ro
+      # 挂载 proxys.txt 文件（如果需要从文件读取代理）
+      - ./proxys.txt:/app/proxys.txt:ro
     networks:
       - api-network
     healthcheck:

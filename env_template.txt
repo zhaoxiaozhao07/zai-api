@@ -45,6 +45,8 @@ ENABLE_TOOLIFY=true
 
 # 代理配置（可选）
 # 支持单个代理或多个代理（用逗号分隔）
+# 也可以在当前目录创建 proxys.txt 文件，一行一个代理
+# 系统会自动合并去重环境变量和 proxys.txt 中的代理，并在请求时选择代理
 #
 # 单个代理示例：
 # HTTP_PROXY=http://proxy.example.com:8080
@@ -53,6 +55,11 @@ ENABLE_TOOLIFY=true
 # 多个代理示例（用逗号分隔）：
 # HTTP_PROXY=http://proxy1.example.com:8080,http://proxy2.example.com:8080,http://proxy3.example.com:8080
 # HTTPS_PROXY=https://proxy1.example.com:8080,https://proxy2.example.com:8080
+#
+# proxys.txt 文件格式示例：
+# http://proxy1.example.com:8080
+# http://proxy2.example.com:8080
+# https://proxy3.example.com:8443
 #
 # 如果不需要代理，保持注释状态或留空
 HTTP_PROXY=

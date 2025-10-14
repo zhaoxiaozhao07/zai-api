@@ -125,16 +125,16 @@ _proxy_index = 0  # 当前代理索引
 _proxy_lock = asyncio.Lock()  # 代理切换锁
 
 def init_proxy_pool():
-    """初始化代理池"""
+    """初始化代理池（支持从环境变量和proxys.txt加载）"""
     global _proxy_list
     
-    # 优先使用 HTTPS_PROXY_LIST，如果没有则使用 HTTP_PROXY_LIST
-    _proxy_list = settings.HTTPS_PROXY_LIST or settings.HTTP_PROXY_LIST
+    # 使用统一的代理列表（已从环境变量和proxys.txt合并去重）
+    _proxy_list = settings.PROXY_LIST
     
     if _proxy_list:
         debug_log(f"[PROXY] 初始化代理池，共 {len(_proxy_list)} 个代理，策略: {settings.PROXY_STRATEGY}")
-        for i, proxy in enumerate(_proxy_list):
-            debug_log(f"  代理 {i+1}: {proxy}")
+        # for i, proxy in enumerate(_proxy_list):
+        #     debug_log(f"  代理 {i+1}: {proxy}")
 
 def get_next_proxy() -> Optional[str]:
     """
