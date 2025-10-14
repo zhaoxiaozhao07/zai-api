@@ -52,6 +52,7 @@ test.*
 
 # Project specific
 tokens.txt
+proxys.txt
 *.bak
 *.tmp
 .cursor/
