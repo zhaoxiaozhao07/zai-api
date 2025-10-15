@@ -2,7 +2,20 @@
 # 使用时请将此文件复制为 .env
 # cp env_template.txt .env
 
+# ========== 上游API地址配置 ==========
+# 支持单个地址或多个地址（逗号分隔）
+# 单个地址示例:
+# API_ENDPOINT=https://chat.z.ai/api/chat/completions
+# 多个地址示例（负载均衡）:
+# API_ENDPOINT=https://chat.z.ai/api/chat/completions,https://deno.com/api/chat/completions,https://mirror.z.ai/api/chat/completions
+# 也可以在当前目录创建upstreams.txt文件，一行一个地址
+# 系统会自动合并去重环境变量和文件中的地址
 API_ENDPOINT=https://chat.z.ai/api/chat/completions
+
+# 上游地址策略（仅在配置多个上游地址时生效）
+# round-robin: 轮询策略，每次请求轮流使用不同的上游地址（推荐用于负载均衡）
+# failover: 故障转移策略，优先使用第一个地址，失败时才切换到下一个
+UPSTREAM_STRATEGY=failover
 
 # 本地API的访问密钥（用于验证客户端请求）
 AUTH_TOKEN=sk-123456

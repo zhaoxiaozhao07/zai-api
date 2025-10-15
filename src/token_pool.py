@@ -174,7 +174,8 @@ class TokenPool:
                         data = response.json()
                         token = data.get("token", "")
                         if token:
-                            info_log(f"[OK] 成功获取匿名Token: {token[:20]}...")
+                            token_preview = f"{token[:20]}...{token[-20:]}" if len(token) > 40 else token
+                            info_log(f"[OK] 成功获取匿名Token: {token_preview}")
                             return token
                     else:
                         last_status_code = response.status_code
@@ -272,37 +273,41 @@ class TokenPool:
         """
         async with self._fetch_lock:  # 使用同一个锁，防止清理和获取的竞态条件
             debug_log("[CACHE] 安全清理匿名Token缓存")
-            old_token = self._anonymous_token[:20] + "..." if self._anonymous_token else "None"
+            if self._anonymous_token and len(self._anonymous_token) > 40:
+                old_token_preview = f"{self._anonymous_token[:20]}...{self._anonymous_token[-20:]}"
+            else:
+                old_token_preview = self._anonymous_token if self._anonymous_token else "None"
             self._anonymous_token = None
             self._anonymous_token_expires_at = None
-            debug_log(f"[CACHE] 匿名Token缓存已清理，原Token: {old_token}")
+            debug_log(f"[CACHE] 匿名Token缓存已清理，原Token: {old_token_preview}")
     
     async def get_token(self, http_client=None) -> str:
         """
         获取Token（智能降级策略）
         优先级：配置Token → 匿名Token → 缓存Token
-        
+
         Args:
             http_client: 外部传入的HTTP客户端（可选）
-            
+
         Returns:
             str: 可用的Token
-            
+
         Raises:
             ValueError: 所有Token获取方式都失败时抛出
         """
-        # 策略1: 如果有配置的Token，优先使用
-        if self.tokens and self.current_token:
-            debug_log(f"[TOKEN] 使用配置Token (索引: {self.current_index}/{len(self.tokens)})")
-            return self.current_token
-        
+        # 策略1: 如果有配置的Token，优先使用（使用锁保护读取，避免与switch_to_next并发）
+        async with self._switch_lock:
+            if self.tokens and self.current_token:
+                debug_log(f"[TOKEN] 使用配置Token (索引: {self.current_index}/{len(self.tokens)})")
+                return self.current_token
+
         # 策略2: 没有配置Token或Token失效，使用匿名Token
         if settings.ENABLE_GUEST_TOKEN:
             info_log("[TOKEN] 配置Token不可用，尝试获取匿名Token...")
             anonymous_token = await self.get_anonymous_token(http_client)
             if anonymous_token:
                 return anonymous_token
-        
+
         # 策略3: 所有方式都失败
         raise ValueError("[ERROR] 无法获取任何可用的Token，请检查配置或网络连接")
     
@@ -394,11 +399,15 @@ class TokenPool:
 
 # 全局token池实例（单例模式）
 _token_pool_instance: Optional[TokenPool] = None
+_token_pool_lock = asyncio.Lock()
 
 
-def get_token_pool() -> TokenPool:
-    """获取全局token池实例（线程安全的单例模式）"""
+async def get_token_pool() -> TokenPool:
+    """获取全局token池实例（异步线程安全的单例模式）"""
     global _token_pool_instance
     if _token_pool_instance is None:
-        _token_pool_instance = TokenPool()
+        async with _token_pool_lock:
+            # 双重检查锁定，防止并发创建多个实例
+            if _token_pool_instance is None:
+                _token_pool_instance = TokenPool()
     return _token_pool_instance

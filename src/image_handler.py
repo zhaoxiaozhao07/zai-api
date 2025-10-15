@@ -70,29 +70,38 @@ def decode_base64_image(base64_str: str) -> Tuple[bytes, str, str]:
         raise
 
 
-async def download_image_from_url(url: str) -> Tuple[bytes, str, str]:
+async def download_image_from_url(url: str, http_client: Optional[httpx.AsyncClient] = None) -> Tuple[bytes, str, str]:
     """
     从URL下载图像
-    
+
     Args:
         url: 图像URL
-        
+        http_client: 可选的HTTP客户端(复用连接池)
+
     Returns:
         (image_bytes, content_type, extension)
     """
     try:
-        async with httpx.AsyncClient() as client:
+        # 使用外部传入的HTTP客户端,如果没有则创建临时客户端
+        if http_client:
+            client = http_client
+            should_close = False
+        else:
+            client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
+            should_close = True
+
+        try:
             response = await client.get(url, timeout=30.0)
             response.raise_for_status()
-            
+
             image_bytes = response.content
             content_type = response.headers.get("Content-Type", "image/png")
-            
+
             # 推断扩展名
             extension = mimetypes.guess_extension(content_type) or ".png"
             if extension.startswith("."):
                 extension = extension[1:]
-            
+
             debug_log(
                 "从URL下载图像",
                 url=url[:100],
@@ -100,9 +109,14 @@ async def download_image_from_url(url: str) -> Tuple[bytes, str, str]:
                 extension=extension,
                 size=len(image_bytes)
             )
-            
+
             return image_bytes, content_type, extension
-    
+
+        finally:
+            # 如果是临时创建的客户端,需要关闭
+            if should_close:
+                await client.aclose()
+
     except Exception as e:
         error_log(f"从URL下载图像失败: {e}", url=url[:100])
         raise
@@ -216,7 +230,8 @@ async def process_image_content(
             filename = f"image.{extension}"
         else:
             debug_log("检测到URL图像", url=image_url[:100])
-            image_bytes, content_type, extension = await download_image_from_url(image_url)
+            # 复用HTTP客户端,避免重复创建连接
+            image_bytes, content_type, extension = await download_image_from_url(image_url, http_client=client)
             # 从URL提取文件名
             from urllib.parse import urlparse
             parsed_url = urlparse(image_url)

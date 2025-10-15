@@ -64,7 +64,7 @@ CONNECTION_POOL_CONFIG = {
     ),
     "timeout": httpx.Timeout(
         connect=10.0,    # 连接超时
-        read=30.0,       # 读取超时
+        read=120.0,      # 读取超时(2分钟,适配Search/Thinking等长时间模型)
         write=30.0,      # 写入超时
         pool=10.0,       # 连接池获取超时
     ),
@@ -104,20 +104,63 @@ async def get_or_create_client(proxy_url: Optional[str] = None) -> httpx.AsyncCl
 async def cleanup_clients():
     """清理所有缓存的HTTP客户端"""
     global _proxy_clients, _default_client
-    
-    # 关闭所有代理客户端
-    for proxy_url, client in _proxy_clients.items():
-        info_log(f"[CLIENT] 关闭代理客户端: {proxy_url}")
-        await client.aclose()
-    _proxy_clients.clear()
-    
-    # 关闭默认客户端
-    if _default_client:
-        info_log("[CLIENT] 关闭默认客户端")
-        await _default_client.aclose()
+
+    # 在锁内收集需要关闭的客户端，避免与get_or_create_client并发冲突
+    async with _client_lock:
+        clients_to_close = list(_proxy_clients.values())
+        _proxy_clients.clear()
+        default = _default_client
         _default_client = None
-    
+
+    # 在锁外关闭客户端，避免阻塞其他协程
+    for client in clients_to_close:
+        try:
+            await client.aclose()
+        except Exception as e:
+            error_log(f"[CLIENT] 关闭代理客户端失败: {e}")
+
+    if default:
+        try:
+            await default.aclose()
+            info_log("[CLIENT] 默认客户端已关闭")
+        except Exception as e:
+            error_log(f"[CLIENT] 关闭默认客户端失败: {e}")
+
     info_log("[CLIENT] 所有客户端已清理")
+
+
+async def cleanup_current_client(proxy_url: Optional[str] = None):
+    """
+    清理当前使用的HTTP客户端
+    用于Token失效时清理可能携带旧认证状态的连接
+
+    Args:
+        proxy_url: 代理地址，如果为None则清理默认客户端
+    """
+    global _proxy_clients, _default_client
+
+    client_to_close = None
+
+    async with _client_lock:
+        if proxy_url is None:
+            # 清理默认客户端
+            if _default_client:
+                client_to_close = _default_client
+                _default_client = None
+                info_log("[CLIENT] 标记默认客户端待清理")
+        else:
+            # 清理指定代理的客户端
+            if proxy_url in _proxy_clients:
+                client_to_close = _proxy_clients.pop(proxy_url)
+                info_log(f"[CLIENT] 标记代理客户端待清理: {proxy_url}")
+
+    # 在锁外关闭客户端
+    if client_to_close:
+        try:
+            await client_to_close.aclose()
+            info_log("[CLIENT] 客户端已关闭，下次请求将创建新连接")
+        except Exception as e:
+            error_log(f"[CLIENT] 关闭客户端失败: {e}")
 
 # ================== 代理池管理 ==================
 _proxy_list = []  # 代理列表
@@ -127,27 +170,44 @@ _proxy_lock = asyncio.Lock()  # 代理切换锁
 def init_proxy_pool():
     """初始化代理池（支持从环境变量和proxys.txt加载）"""
     global _proxy_list
-    
+
     # 使用统一的代理列表（已从环境变量和proxys.txt合并去重）
     _proxy_list = settings.PROXY_LIST
-    
+
     if _proxy_list:
         info_log(f"[PROXY] 初始化代理池，共 {len(_proxy_list)} 个代理，策略: {settings.PROXY_STRATEGY}")
         # for i, proxy in enumerate(_proxy_list):
         #     debug_log(f"  代理 {i+1}: {proxy}")
 
+# ================== 上游地址池管理 ==================
+_upstream_list = []  # 上游地址列表
+_upstream_index = 0  # 当前上游地址索引
+_upstream_lock = asyncio.Lock()  # 上游地址切换锁
+
+def init_upstream_pool():
+    """初始化上游地址池(支持从环境变量和upstreams.txt加载)"""
+    global _upstream_list
+
+    # 使用统一的上游地址列表(已从环境变量和upstreams.txt合并去重)
+    _upstream_list = settings.UPSTREAM_LIST
+
+    if _upstream_list:
+        info_log(f"[UPSTREAM] 初始化上游地址池,共 {len(_upstream_list)} 个地址,策略: {settings.UPSTREAM_STRATEGY}")
+        for i, upstream in enumerate(_upstream_list):
+            debug_log(f"  上游 {i+1}: {upstream}")
+
 async def get_next_proxy() -> Optional[str]:
     """
     获取下一个代理（根据策略）- 并发安全版本
-    
+
     Returns:
         Optional[str]: 代理地址，如果没有可用代理则返回 None
     """
     global _proxy_index
-    
+
     if not _proxy_list:
         return None
-    
+
     if settings.PROXY_STRATEGY == "round-robin":
         # 轮询策略：每次调用都切换到下一个代理（使用锁保护并发安全）
         async with _proxy_lock:
@@ -156,10 +216,11 @@ async def get_next_proxy() -> Optional[str]:
             debug_log(f"[PROXY] Round-robin选择代理 #{_proxy_index}: {proxy}")
             return proxy
     else:
-        # failover 策略：始终使用当前索引的代理（读取不需要锁）
-        proxy = _proxy_list[_proxy_index]
-        debug_log(f"[PROXY] Failover使用代理 #{_proxy_index}: {proxy}")
-        return proxy
+        # failover 策略：始终使用当前索引的代理（也需要锁保护读取，避免与switch_proxy_on_failure并发）
+        async with _proxy_lock:
+            proxy = _proxy_list[_proxy_index]
+            debug_log(f"[PROXY] Failover使用代理 #{_proxy_index}: {proxy}")
+            return proxy
 
 async def switch_proxy_on_failure():
     """
@@ -175,40 +236,83 @@ async def switch_proxy_on_failure():
         _proxy_index = (_proxy_index + 1) % len(_proxy_list)
         info_log(f"[PROXY] 代理失败，从 #{old_index} 切换到 #{_proxy_index}: {_proxy_list[_proxy_index]}")
 
-# 初始化代理池
-init_proxy_pool()
+async def get_next_upstream() -> str:
+    """
+    获取下一个上游地址（根据策略）- 并发安全版本
 
-async def get_request_client() -> httpx.AsyncClient:
+    Returns:
+        str: 上游地址
+    """
+    global _upstream_index
+
+    # 如果没有配置多个上游地址，返回默认地址
+    if not _upstream_list:
+        return settings.API_ENDPOINT
+
+    if settings.UPSTREAM_STRATEGY == "round-robin":
+        # 轮询策略：每次调用都切换到下一个上游地址（使用锁保护并发安全）
+        async with _upstream_lock:
+            upstream = _upstream_list[_upstream_index]
+            _upstream_index = (_upstream_index + 1) % len(_upstream_list)
+            debug_log(f"[UPSTREAM] Round-robin选择上游 #{_upstream_index}: {upstream}")
+            return upstream
+    else:
+        # failover 策略：始终使用当前索引的上游地址（也需要锁保护读取，避免与switch_upstream_on_failure并发）
+        async with _upstream_lock:
+            upstream = _upstream_list[_upstream_index]
+            debug_log(f"[UPSTREAM] Failover使用上游 #{_upstream_index}: {upstream}")
+            return upstream
+
+async def switch_upstream_on_failure():
+    """
+    失败时切换上游地址（仅 failover 策略需要）
+    """
+    global _upstream_index
+
+    if not _upstream_list or settings.UPSTREAM_STRATEGY != "failover":
+        return
+
+    async with _upstream_lock:
+        old_index = _upstream_index
+        _upstream_index = (_upstream_index + 1) % len(_upstream_list)
+        info_log(f"[UPSTREAM] 上游失败，从 #{old_index} 切换到 #{_upstream_index}: {_upstream_list[_upstream_index]}")
+
+# 初始化代理池和上游地址池
+init_proxy_pool()
+init_upstream_pool()
+
+async def get_request_client() -> tuple[httpx.AsyncClient, Optional[str]]:
     """
     为当前请求获取合适的HTTP客户端（简化版）
     使用客户端池复用连接，每个代理维护一个长期客户端
-    
+
     Returns:
-        httpx.AsyncClient: 复用的HTTP客户端
+        tuple[httpx.AsyncClient, Optional[str]]: (复用的HTTP客户端, 使用的代理URL)
     """
     # 获取当前应该使用的代理（并发安全）
     proxy = await get_next_proxy()
-    
+
     # 获取或创建对应的客户端
-    return await get_or_create_client(proxy)
+    client = await get_or_create_client(proxy)
+    return client, proxy
 
 def calculate_backoff_delay(retry_count: int, status_code: int = None, base_delay: float = 1.5, max_delay: float = 8.0) -> float:
     """
     计算退避延迟时间（带随机抖动和针对不同错误的策略）
-    
+
     Args:
         retry_count: 当前重试次数（从1开始）
         status_code: HTTP状态码，用于区分不同错误类型
         base_delay: 基础延迟时间（秒）
         max_delay: 最大延迟时间（秒）
-    
+
     Returns:
         计算后的延迟时间（秒）
     """
     # 使用线性增长而非指数增长：base_delay * retry_count
     # 这样：第1次=1.5s, 第2次=3s, 第3次=4.5s, 第4次=6s
     linear_delay = base_delay * retry_count
-    
+
     # 针对不同错误类型调整延迟
     if status_code == 429:  # Rate limit - 更长的退避时间
         linear_delay *= 1.5  # 1.5倍延迟
@@ -218,26 +322,91 @@ def calculate_backoff_delay(retry_count: int, status_code: int = None, base_dela
         info_log("[BACKOFF] 检测到服务端错误，使用适中退避时间")
     elif status_code in [400, 401, 405]:  # 认证/请求错误 - 标准延迟
         info_log(f"[BACKOFF] 检测到{status_code}认证/请求错误，使用标准退避时间")
-    
+
     # 限制最大延迟
     linear_delay = min(linear_delay, max_delay)
-    
+
     # 添加随机抖动因子（±20%），避免多个请求同时重试造成雪崩
     jitter = linear_delay * 0.2  # 20%的抖动范围
     jittered_delay = linear_delay + random.uniform(-jitter, jitter)
-    
+
     # 确保延迟不会小于0.5秒
     final_delay = max(jittered_delay, 0.5)
-    
-    debug_log(
-        "[BACKOFF] 计算退避延迟",
-        retry_count=retry_count,
-        status_code=status_code,
-        linear=f"{linear_delay:.2f}s",
-        final=f"{final_delay:.2f}s"
-    )
-    
+
     return final_delay
+
+
+def process_toolify_detection(toolify_detector, delta_content: str, has_thinking: bool, transformed: dict, request):
+    """
+    处理工具调用检测
+
+    Args:
+        toolify_detector: 工具调用检测器
+        delta_content: 增量内容
+        has_thinking: 是否已发送role chunk
+        transformed: 转换后的请求
+        request: 原始请求
+
+    Returns:
+        (chunks_to_yield, should_continue, processed_content, updated_has_thinking):
+        - chunks_to_yield: 需要yield的chunk列表
+        - should_continue: 是否应该跳过后续处理
+        - processed_content: 处理后的内容
+        - updated_has_thinking: 更新后的has_thinking状态
+    """
+    chunks_to_yield = []
+
+    if not toolify_detector or not delta_content:
+        return chunks_to_yield, False, delta_content, has_thinking
+
+    debug_log(f"[TOOLIFY] 调用工具检测器")
+    is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
+
+    if is_tool_detected:
+        debug_log(f"[TOOLIFY] 检测到工具调用触发信号，缓冲区长度: {len(toolify_detector.content_buffer)}")
+        debug_log(f"[TOOLIFY] 检测时缓冲区内容: {repr(toolify_detector.content_buffer[:200])}")
+        debug_log(f"[TOOLIFY] 检测器当前状态: {toolify_detector.state}")
+
+        # 如果之前有输出内容，先发送
+        if content_to_yield:
+            debug_log(f"[TOOLIFY] 输出触发信号前的内容: {repr(content_to_yield[:100])}")
+            if not has_thinking:
+                has_thinking = True
+                role_chunk = {
+                    "choices": [{
+                        "delta": {"role": "assistant"},
+                        "finish_reason": None,
+                        "index": 0,
+                        "logprobs": None,
+                    }],
+                    "created": int(time.time()),
+                    "id": transformed["body"]["chat_id"],
+                    "model": request.model,
+                    "object": "chat.completion.chunk",
+                    "system_fingerprint": "fp_zai_001",
+                }
+                chunks_to_yield.append(f"data: {json_lib.dumps(role_chunk)}\n\n")
+
+            content_chunk = {
+                "choices": [{
+                    "delta": {"content": content_to_yield},
+                    "finish_reason": None,
+                    "index": 0,
+                    "logprobs": None,
+                }],
+                "created": int(time.time()),
+                "id": transformed["body"]["chat_id"],
+                "model": request.model,
+                "object": "chat.completion.chunk",
+                "system_fingerprint": "fp_zai_001",
+            }
+            chunks_to_yield.append(f"data: {json_lib.dumps(content_chunk)}\n\n")
+
+        debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
+        return chunks_to_yield, True, "", has_thinking
+
+    # 使用检测器处理后的内容
+    return chunks_to_yield, False, content_to_yield, has_thinking
 
 
 @router.get("/v1/models")
@@ -284,19 +453,23 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             if api_key != settings.AUTH_TOKEN:
                 raise HTTPException(status_code=401, detail="Invalid API key")
         
-        # 获取复用的HTTP客户端
-        request_client = await get_request_client()
-        debug_log("[REQUEST] 获取复用HTTP客户端")
-            
+        # 获取复用的HTTP客户端和使用的代理URL
+        request_client, current_proxy = await get_request_client()
+        debug_log("[REQUEST] 获取复用HTTP客户端", proxy=current_proxy or "直连")
+
+        # 获取当前应该使用的上游地址（并发安全）
+        current_upstream = await get_next_upstream()
+        debug_log(f"[REQUEST] 使用上游地址: {current_upstream}")
+
         # 转换请求
         request_dict = request.model_dump()
-        
+
         # 检查是否需要启用工具调用
         enable_toolify = should_enable_toolify(request_dict)
-        
+
         # 准备消息列表
         messages = [msg.model_dump() if hasattr(msg, 'model_dump') else msg for msg in request.messages]
-        
+
         # 如果启用工具调用，预处理消息并注入提示词
         if enable_toolify:
             info_log("[TOOLIFY] 工具调用功能已启用")
@@ -308,16 +481,16 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             request_dict_for_transform["messages"] = messages
         else:
             request_dict_for_transform = request_dict
-        
+
         info_log("开始转换请求格式: OpenAI -> Z.AI")
-        
-        # 初始转换（传入request_client用于图像上传和Token获取）
-        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+
+        # 初始转换（传入request_client用于图像上传和Token获取，以及上游URL）
+        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
         
         # 根据stream参数决定返回流式或非流式响应
         if not request.stream:
             info_log("使用非流式模式")
-            result = await handle_non_stream_request(request, transformed, enable_toolify, request_client)
+            result = await handle_non_stream_request(request, transformed, enable_toolify, request_client, current_proxy, current_upstream, request_dict_for_transform)
             return result
 
         # 调用上游API（流式模式）
@@ -325,6 +498,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             """流式响应生成器（包含重试机制、智能退避策略和工具调用检测）"""
             nonlocal transformed  # 声明使用外部作用域的transformed变量
             nonlocal request_client  # 声明使用外部作用域的request_client变量
+            nonlocal current_proxy  # 声明使用外部作用域的current_proxy变量
+            nonlocal current_upstream  # 声明使用外部作用域的current_upstream变量
             retry_count = 0
             last_error = None
             last_status_code = None  # 记录上次失败的状态码
@@ -392,7 +567,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                 
                                 # 检查当前是否使用匿名Token
                                 from .token_pool import get_token_pool
-                                token_pool = get_token_pool()
+                                token_pool = await get_token_pool()
                                 current_token = transformed.get("token", "")
                                 is_anonymous = token_pool.is_anonymous_token(current_token)
                                 
@@ -403,15 +578,23 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     # 刷新header模板
                                     info_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
                                     await transformer.refresh_header_template()
-                                    # 清理客户端缓存，强制下次重新创建（匿名Token可能导致连接状态异常）
-                                    info_log("[CLIENT] 清理HTTP客户端缓存，下次请求将创建新客户端")
-                                    await cleanup_clients()
-                                    
-                                    # 重新获取客户端
-                                    request_client = await get_request_client()
-                                    
-                                    # 使用新的匿名Token重新生成请求
-                                    transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+
+                                    # 清理当前使用的客户端（可能携带旧Token的认证状态）
+                                    await cleanup_current_client(current_proxy)
+
+                                    # 重新获取客户端（会创建新连接）
+                                    request_client, current_proxy = await get_request_client()
+
+                                    # failover策略下，匿名Token错误也尝试切换上游
+                                    if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                        await switch_upstream_on_failure()
+                                        info_log(f"[FAILOVER] 匿名Token错误，尝试切换上游地址")
+
+                                    # 重新获取上游地址（可能已切换）
+                                    current_upstream = await get_next_upstream()
+
+                                    # 使用新的匿名Token和上游地址重新生成请求
+                                    transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
                                     info_log("[OK] 已获取新的匿名Token并重新生成请求")
                                 else:
                                     # 配置Token：按原有逻辑处理
@@ -419,12 +602,28 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                         info_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
                                         new_token = await transformer.switch_token()
                                         await transformer.refresh_header_template()
-                                        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client)
+                                        # 重新获取上游地址（可能已切换）
+                                        current_upstream = await get_next_upstream()
+                                        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
                                         info_log(f"[OK] 已切换到下一个配置Token")
-                                    
-                                    # 网络错误时尝试切换代理（仅限 failover 策略）
-                                    if response.status_code in [502, 503, 504] and _proxy_list:
-                                        await switch_proxy_on_failure()
+
+                                        # failover策略下，Token错误也尝试切换上游
+                                        if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                            await switch_upstream_on_failure()
+                                            current_upstream = await get_next_upstream()
+                                            transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
+                                            info_log(f"[FAILOVER] Token错误，已切换到新的上游地址")
+
+                                    # 网络错误时尝试切换代理和上游（仅限 failover 策略）
+                                    if response.status_code in [502, 503, 504]:
+                                        if _proxy_list and settings.PROXY_STRATEGY == "failover":
+                                            await switch_proxy_on_failure()
+                                        if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                            await switch_upstream_on_failure()
+                                            # 切换上游后需要重新生成请求
+                                            current_upstream = await get_next_upstream()
+                                            transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
+                                            info_log(f"[FAILOVER] 网络错误，已切换到新的上游地址")
                                 
                                 continue
                             
@@ -623,55 +822,15 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                             if phase == "thinking":
                                                 delta_content = data.get("delta_content", "")
                                                 debug_log(f"[SSE-THINKING] delta_content长度: {len(delta_content) if delta_content else 0}, 内容: {repr(delta_content[:50]) if delta_content else 'EMPTY'}")
-                                                
-                                                # 工具调用检测
-                                                if toolify_detector and delta_content:
-                                                    debug_log(f"[SSE-THINKING] 调用工具检测器")
-                                                    is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
-                                                    
-                                                    if is_tool_detected:
-                                                        debug_log(f"[TOOLIFY] 在thinking阶段检测到工具调用触发信号，缓冲区长度: {len(toolify_detector.content_buffer)}")
-                                                        debug_log(f"[TOOLIFY] 检测时缓冲区内容: {repr(toolify_detector.content_buffer[:200])}")
-                                                        debug_log(f"[TOOLIFY] 检测器当前状态: {toolify_detector.state}")
-                                                        # 如果之前有输出内容，先发送
-                                                        if content_to_yield:
-                                                            debug_log(f"[TOOLIFY] 输出触发信号前的内容: {repr(content_to_yield[:100])}")
-                                                            if not has_thinking:
-                                                                has_thinking = True
-                                                                role_chunk = {
-                                                                    "choices": [{
-                                                                        "delta": {"role": "assistant"},
-                                                                        "finish_reason": None,
-                                                                        "index": 0,
-                                                                        "logprobs": None,
-                                                                    }],
-                                                                    "created": int(time.time()),
-                                                                    "id": transformed["body"]["chat_id"],
-                                                                    "model": request.model,
-                                                                    "object": "chat.completion.chunk",
-                                                                    "system_fingerprint": "fp_zai_001",
-                                                                }
-                                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
-                                                            
-                                                            content_chunk = {
-                                                                "choices": [{
-                                                                    "delta": {"content": content_to_yield},
-                                                                    "finish_reason": None,
-                                                                    "index": 0,
-                                                                    "logprobs": None,
-                                                                }],
-                                                                "created": int(time.time()),
-                                                                "id": transformed["body"]["chat_id"],
-                                                                "model": request.model,
-                                                                "object": "chat.completion.chunk",
-                                                                "system_fingerprint": "fp_zai_001",
-                                                            }
-                                                            yield f"data: {json_lib.dumps(content_chunk)}\n\n"
-                                                        debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
-                                                        continue
-                                                    
-                                                    # 使用检测器处理后的内容
-                                                    delta_content = content_to_yield
+
+                                                # 工具调用检测（使用提取的函数）
+                                                chunks, should_continue, delta_content, has_thinking = process_toolify_detection(
+                                                    toolify_detector, delta_content, has_thinking, transformed, request
+                                                )
+                                                for chunk in chunks:
+                                                    yield chunk
+                                                if should_continue:
+                                                    continue
                                                 
                                                 if not has_thinking:
                                                     has_thinking = True
@@ -731,55 +890,15 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                 edit_content = data.get("edit_content", "")
                                                 delta_content = data.get("delta_content", "")
                                                 debug_log(f"[SSE-ANSWER] delta_content长度: {len(delta_content) if delta_content else 0}, edit_content长度: {len(edit_content) if edit_content else 0}")
-                                                
-                                                # 工具调用检测
-                                                if toolify_detector and delta_content:
-                                                    debug_log(f"[SSE-ANSWER] 调用工具检测器")
-                                                    is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
-                                                    
-                                                    if is_tool_detected:
-                                                        debug_log(f"[TOOLIFY] 在answer阶段检测到工具调用触发信号，缓冲区长度: {len(toolify_detector.content_buffer)}")
-                                                        debug_log(f"[TOOLIFY] 检测时缓冲区内容: {repr(toolify_detector.content_buffer[:200])}")
-                                                        debug_log(f"[TOOLIFY] 检测器当前状态: {toolify_detector.state}")
-                                                        # 如果之前有输出内容，先发送
-                                                        if content_to_yield:
-                                                            debug_log(f"[TOOLIFY] 输出触发信号前的内容: {repr(content_to_yield[:100])}")
-                                                            if not has_thinking:
-                                                                has_thinking = True
-                                                                role_chunk = {
-                                                                    "choices": [{
-                                                                        "delta": {"role": "assistant"},
-                                                                        "finish_reason": None,
-                                                                        "index": 0,
-                                                                        "logprobs": None,
-                                                                    }],
-                                                                    "created": int(time.time()),
-                                                                    "id": transformed["body"]["chat_id"],
-                                                                    "model": request.model,
-                                                                    "object": "chat.completion.chunk",
-                                                                    "system_fingerprint": "fp_zai_001",
-                                                                }
-                                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
-                                                            
-                                                            content_chunk = {
-                                                                "choices": [{
-                                                                    "delta": {"content": content_to_yield},
-                                                                    "finish_reason": None,
-                                                                    "index": 0,
-                                                                    "logprobs": None,
-                                                                }],
-                                                                "created": int(time.time()),
-                                                                "id": transformed["body"]["chat_id"],
-                                                                "model": request.model,
-                                                                "object": "chat.completion.chunk",
-                                                                "system_fingerprint": "fp_zai_001",
-                                                            }
-                                                            yield f"data: {json_lib.dumps(content_chunk)}\n\n"
-                                                        debug_log(f"[TOOLIFY] 跳过本次delta处理，等待更多内容")
-                                                        continue
-                                                    
-                                                    # 使用检测器处理后的内容
-                                                    delta_content = content_to_yield
+
+                                                # 工具调用检测（使用提取的函数）
+                                                chunks, should_continue, delta_content, has_thinking = process_toolify_detection(
+                                                    toolify_detector, delta_content, has_thinking, transformed, request
+                                                )
+                                                for chunk in chunks:
+                                                    yield chunk
+                                                if should_continue:
+                                                    continue
 
                                                 if not has_thinking:
                                                     has_thinking = True
@@ -979,7 +1098,9 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     error_log("流处理错误", error=str(e))
                     retry_count += 1
                     last_error = str(e)
-                    
+                    # 重置status_code,避免下次重试时使用旧的状态码
+                    last_status_code = None
+
                     # 网络连接错误时尝试切换代理（仅限 failover 策略）
                     if _proxy_list and "connect" in str(e).lower():
                         await switch_proxy_on_failure()
@@ -1046,16 +1167,27 @@ def create_openai_response(chat_id: str, model: str, content: str, reasoning_con
     return response
 
 
-async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, enable_toolify: bool = False, request_client: httpx.AsyncClient = None) -> dict:
+async def handle_non_stream_request(
+    request: OpenAIRequest,
+    transformed: dict,
+    enable_toolify: bool = False,
+    request_client: httpx.AsyncClient = None,
+    current_proxy: Optional[str] = None,
+    current_upstream: str = None,
+    request_dict_for_transform: dict = None
+) -> dict:
     """
     处理非流式请求
-    
+
     Args:
         request: OpenAI请求对象
         transformed: 转换后的请求
         enable_toolify: 是否启用工具调用
         request_client: 请求专用的HTTP客户端
-    
+        current_proxy: 当前使用的代理URL（用于Token失效时清理客户端）
+        current_upstream: 当前使用的上游地址
+        request_dict_for_transform: 用于重新转换的请求字典
+
     说明：上游始终以 SSE 形式返回（transform_request_in 固定 stream=True），
     因此这里需要聚合 aiter_lines() 的 data: 块，提取 usage、思考内容与答案内容，
     并最终产出一次性 OpenAI 格式响应。
@@ -1067,7 +1199,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
         "completion_tokens": 0,
         "total_tokens": 0,
     }
-    
+
     retry_count = 0
     last_error = None
     last_status_code = None
@@ -1126,7 +1258,7 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                         
                         # 检查当前是否使用匿名Token
                         from .token_pool import get_token_pool
-                        token_pool = get_token_pool()
+                        token_pool = await get_token_pool()
                         current_token = transformed.get("token", "")
                         is_anonymous = token_pool.is_anonymous_token(current_token)
                         
@@ -1137,20 +1269,28 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                             # 刷新header模板
                             info_log("[TRANSFORMER-NONSTREAM] 刷新header模板")
                             await transformer.refresh_header_template()
-                            # 清理客户端缓存，强制下次重新创建
-                            info_log("[CLIENT-NONSTREAM] 清理HTTP客户端缓存，下次请求将创建新客户端")
-                            await cleanup_clients()
-                            
-                            # 重新获取客户端
+
+                            # 清理当前使用的客户端（可能携带旧Token的认证状态）
+                            await cleanup_current_client(current_proxy)
+
+                            # 重新获取客户端（会创建新连接）
                             if request_client:
-                                request_client = await get_request_client()
+                                request_client, current_proxy = await get_request_client()
                                 client = request_client
                             else:
-                                client = await get_request_client()
-                            
-                            # 使用新的匿名Token重新生成请求
-                            request_dict = request.model_dump()
-                            transformed = await transformer.transform_request_in(request_dict, client=client)
+                                client, current_proxy = await get_request_client()
+
+                            # failover策略下，匿名Token错误也尝试切换上游
+                            if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                await switch_upstream_on_failure()
+                                info_log(f"[FAILOVER-NONSTREAM] 匿名Token错误，尝试切换上游地址")
+
+                            # 重新获取上游地址（可能已切换）
+                            current_upstream = await get_next_upstream()
+
+                            # 使用新的匿名Token和上游地址重新生成请求
+                            request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
+                            transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
                             info_log("[OK-NONSTREAM] 已获取新的匿名Token并重新生成请求")
                         else:
                             # 配置Token：按原有逻辑处理
@@ -1158,13 +1298,31 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
                                 info_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
                                 new_token = await transformer.switch_token()
                                 await transformer.refresh_header_template()
-                                request_dict = request.model_dump()
-                                transformed = await transformer.transform_request_in(request_dict, client=client)
+                                # 重新获取上游地址（可能已切换）
+                                current_upstream = await get_next_upstream()
+                                request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
+                                transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
                                 info_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
-                            
-                            # 网络错误时尝试切换代理（仅限 failover 策略）
-                            if response.status_code in [502, 503, 504] and _proxy_list:
-                                await switch_proxy_on_failure()
+
+                                # failover策略下，Token错误也尝试切换上游
+                                if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                    await switch_upstream_on_failure()
+                                    current_upstream = await get_next_upstream()
+                                    request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
+                                    transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
+                                    info_log(f"[FAILOVER-NONSTREAM] Token错误，已切换到新的上游地址")
+
+                            # 网络错误时尝试切换代理和上游（仅限 failover 策略）
+                            if response.status_code in [502, 503, 504]:
+                                if _proxy_list and settings.PROXY_STRATEGY == "failover":
+                                    await switch_proxy_on_failure()
+                                if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                    await switch_upstream_on_failure()
+                                    # 切换上游后需要重新生成请求
+                                    current_upstream = await get_next_upstream()
+                                    request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
+                                    transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
+                                    info_log(f"[FAILOVER-NONSTREAM] 网络错误，已切换到新的上游地址")
                         
                         continue
                     
@@ -1338,11 +1496,13 @@ async def handle_non_stream_request(request: OpenAIRequest, transformed: dict, e
             error_log("非流式处理错误", error=str(e))
             retry_count += 1
             last_error = str(e)
-            
+            # 重置status_code,避免下次重试时使用旧的状态码
+            last_status_code = None
+
             # 网络连接错误时尝试切换代理（仅限 failover 策略）
             if _proxy_list and "connect" in str(e).lower():
                 await switch_proxy_on_failure()
-            
+
             if retry_count > settings.MAX_RETRIES:
                 raise HTTPException(
                     status_code=500,

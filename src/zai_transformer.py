@@ -262,8 +262,9 @@ class ZAITransformer:
         """初始化转换器"""
         self.name = "zai"
         self.base_url = "https://chat.z.ai"
-        self.api_url = settings.API_ENDPOINT
-        
+        # 不再在初始化时固定api_url，而是在transform_request_in中动态获取
+        # self.api_url = settings.API_ENDPOINT
+
         # 使用统一配置的模型映射
         self.model_mapping = MODEL_MAPPING
         
@@ -273,30 +274,31 @@ class ZAITransformer:
     async def get_token(self, http_client=None) -> str:
         """
         获取Z.AI认证令牌（从token池获取）
-        
+
         Args:
             http_client: 外部传入的HTTP客户端（用于匿名Token获取）
-            
+
         Returns:
             str: 可用的Token
         """
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         token = await token_pool.get_token(http_client=http_client)
-        
-        debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token[:20]}...")
+
+        token_preview = f"{token[:20]}...{token[-20:]}" if len(token) > 40 else token
+        debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token_preview}")
         return token
     
     async def switch_token(self, http_client=None) -> str:
         """
         切换到下一个token（请求失败时调用）
-        
+
         Args:
             http_client: 外部传入的HTTP客户端（如果切换到匿名Token时使用）
-            
+
         Returns:
             str: 下一个Token
         """
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         token = await token_pool.switch_to_next()
         return token
     
@@ -305,7 +307,7 @@ class ZAITransformer:
         清理匿名Token缓存（当Token失效时调用）
         线程安全版本
         """
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         await token_pool.clear_anonymous_token_cache()  # 调用异步版本
         debug_log("[TRANSFORMER] 匿名Token缓存已清理")
     
@@ -422,15 +424,25 @@ class ZAITransformer:
         return user_content
 
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
-    async def transform_request_in(self, request: Dict[str, Any], client=None) -> Dict[str, Any]:
-        """转换OpenAI请求为z.ai格式"""
+    async def transform_request_in(self, request: Dict[str, Any], client=None, upstream_url: str = None) -> Dict[str, Any]:
+        """
+        转换OpenAI请求为z.ai格式
+
+        Args:
+            request: OpenAI格式的请求
+            client: HTTP客户端（用于图像上传和Token获取）
+            upstream_url: 上游API地址（如果为None则使用默认配置）
+
+        Returns:
+            转换后的请求字典
+        """
         info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
         # 获取认证令牌（传入client用于匿名Token获取）
         token = await self.get_token(http_client=client)
-        
+
         # 检查匿名Token是否尝试使用视觉模型
-        token_pool = get_token_pool()
+        token_pool = await get_token_pool()
         messages = request.get("messages", [])
         
         if token_pool.is_anonymous_token(token) and self._has_image_content(messages):
@@ -596,17 +608,21 @@ class ZAITransformer:
             with perf_timer("generate_signature", threshold_ms=10):
                 signature_result = self.signature_generator.generate(token, request_id, timestamp, user_content)
                 signature = signature_result["signature"]
-            
+
             # 添加签名到headers
             dynamic_headers["X-Signature"] = signature
             query_params["signature_timestamp"] = str(timestamp)
-            
+
             debug_log("  Z.AI签名已生成并添加到请求中")
         except Exception as e:
             error_log(f"生成Z.AI签名失败: {e}")
-        
+
+        # 使用传入的上游URL或默认配置
+        api_url = upstream_url if upstream_url else settings.API_ENDPOINT
+        debug_log(f"  使用上游地址: {api_url}")
+
         # 构建完整的URL
-        url_with_params = f"{self.api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
+        url_with_params = f"{api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
 
         headers = {
             **dynamic_headers,

@@ -15,26 +15,26 @@ load_dotenv(override=True)
 def _load_proxy_list() -> list:
     """
     从环境变量和proxys.txt文件加载代理列表，并去重合并
-    
+
     Returns:
         list: 去重后的代理列表
     """
     proxy_set = set()
-    
+
     # 1. 从环境变量加载代理（支持HTTP_PROXY和HTTPS_PROXY，优先HTTPS_PROXY）
     https_proxy_raw = os.getenv("HTTPS_PROXY", "")
     http_proxy_raw = os.getenv("HTTP_PROXY", "")
-    
+
     # 处理HTTPS代理（优先）
     if https_proxy_raw:
         env_proxies = [p.strip() for p in https_proxy_raw.split(",") if p.strip()]
         proxy_set.update(env_proxies)
-    
+
     # 处理HTTP代理
     if http_proxy_raw:
         env_proxies = [p.strip() for p in http_proxy_raw.split(",") if p.strip()]
         proxy_set.update(env_proxies)
-    
+
     # 2. 从proxys.txt文件加载代理（可选）
     proxys_file = Path("proxys.txt")
     if proxys_file.exists():
@@ -46,23 +46,73 @@ def _load_proxy_list() -> list:
                     print(f"[INFO] 从proxys.txt加载了 {len(file_proxies)} 个代理")
         except Exception as e:
             print(f"[ERROR] 读取proxys.txt失败: {e}")
-    
+
     # 去重后的代理列表
     proxy_list = list(proxy_set)
-    
+
     if proxy_list:
         print(f"[INFO] 代理池初始化完成，共 {len(proxy_list)} 个唯一代理")
         # for i, proxy in enumerate(proxy_list, 1):
         #     print(f"  代理 {i}: {proxy}")
-    
+
     return proxy_list
+
+
+def _load_upstream_list() -> list:
+    """
+    从环境变量和upstreams.txt文件加载上游地址列表,并去重合并
+
+    Returns:
+        list: 去重后的上游地址列表
+    """
+    upstream_set = set()
+
+    # 1. 从环境变量加载上游地址(支持逗号分隔多个)
+    api_endpoint_raw = os.getenv("API_ENDPOINT", "")
+
+    if api_endpoint_raw:
+        env_upstreams = [u.strip() for u in api_endpoint_raw.split(",") if u.strip()]
+        upstream_set.update(env_upstreams)
+
+    # 2. 从upstreams.txt文件加载上游地址(可选)
+    upstreams_file = Path("upstreams.txt")
+    if upstreams_file.exists():
+        try:
+            with open(upstreams_file, 'r', encoding='utf-8') as f:
+                file_upstreams = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+                upstream_set.update(file_upstreams)
+                if file_upstreams:
+                    print(f"[INFO] 从upstreams.txt加载了 {len(file_upstreams)} 个上游地址")
+        except Exception as e:
+            print(f"[ERROR] 读取upstreams.txt失败: {e}")
+
+    # 去重后的上游地址列表
+    upstream_list = list(upstream_set)
+
+    if upstream_list:
+        print(f"[INFO] 上游地址池初始化完成,共 {len(upstream_list)} 个唯一地址")
+        # for i, upstream in enumerate(upstream_list, 1):
+        #     print(f"  上游 {i}: {upstream}")
+
+    return upstream_list
 
 
 class Settings(BaseSettings):
     """Application settings"""
-    
-    # API Configuration
-    API_ENDPOINT: str = os.getenv("API_ENDPOINT", "https://chat.z.ai/api/chat/completions")
+
+    # API Configuration - 上游地址配置(支持多个地址)
+    # 从环境变量和upstreams.txt文件加载上游地址列表,并去重合并
+    _upstream_list = _load_upstream_list()
+
+    # 统一的上游地址列表(合并去重后的结果)
+    UPSTREAM_LIST: list = _upstream_list
+
+    # 为了向后兼容,保留单地址配置(使用列表中的第一个)
+    API_ENDPOINT: str = _upstream_list[0] if _upstream_list else "https://chat.z.ai/api/chat/completions"
+
+    # 上游地址策略: failover(失败切换) 或 round-robin(轮询)
+    UPSTREAM_STRATEGY: str = os.getenv("UPSTREAM_STRATEGY", "round-robin").lower()
+
     AUTH_TOKEN: str = os.getenv("AUTH_TOKEN", "sk-your-api-key")
     
     # Z.AI Token Configuration
