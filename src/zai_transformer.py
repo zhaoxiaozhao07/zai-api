@@ -123,7 +123,7 @@ async def get_header_template() -> Dict[str, str]:
         # 设置特定于Z.AI的headers
         base_headers["Origin"] = "https://chat.z.ai"
         base_headers["Content-Type"] = "application/json"
-        base_headers["X-Fe-Version"] = "prod-fe-1.0.97"
+        base_headers["X-Fe-Version"] = settings.ZAI_FE_VERSION
         
         # 设置Fetch相关headers（用于CORS请求）
         base_headers["Sec-Fetch-Dest"] = "empty"
