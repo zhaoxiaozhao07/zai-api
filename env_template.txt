@@ -96,8 +96,8 @@ HTTPS_PROXY=
 # Z.AI 签名密钥（用于API请求签名，默认值：junjie），请勿修改
 ZAI_SIGNING_SECRET=junjie
 
-# Z.AI 前端版本号（用于API请求头，默认值：prod-fe-1.0.78）
-ZAI_FE_VERSION=prod-fe-1.0.78
+# Z.AI 前端版本号（用于API请求头，默认值：prod-fe-1.0.99）
+ZAI_FE_VERSION=prod-fe-1.0.99
 
 # 模型配置
 PRIMARY_MODEL=GLM-4.5
