@@ -636,8 +636,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
                                         await switch_upstream_on_failure()
                                         current_upstream = await get_next_upstream()
-                                            transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
-                                            info_log(f"[FAILOVER] 网络错误，已切换到新的上游地址")
+                                        transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
+                                        info_log(f"[FAILOVER] 网络错误，已切换上游")
                                 
                                 continue
                             
@@ -1336,10 +1336,10 @@ async def handle_non_stream_request(
                                 await switch_proxy_on_failure()
                             if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
                                 await switch_upstream_on_failure()
-                                    current_upstream = await get_next_upstream()
-                                    request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
-                                    transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
-                                    info_log(f"[FAILOVER-NONSTREAM] 网络错误，已切换到新的上游地址")
+                                current_upstream = await get_next_upstream()
+                                request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
+                                transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
+                                info_log(f"[FAILOVER-NONSTREAM] 网络错误，已切换上游")
                         
                         continue
                     

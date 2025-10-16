@@ -56,16 +56,22 @@ async def health():
 if __name__ == "__main__":
     import uvicorn
     import os
+    import platform
+    import multiprocessing
 
-    # 根据 CPU 核心数自动设置 workers（默认 4，可通过环境变量覆盖）
-    workers = int(os.getenv("UVICORN_WORKERS", "4"))
+    if platform.system() == "Windows":
+        workers = 1
+    else:
+        # (2 × CPU核心数) + 1，环境变量可覆盖
+        cpu_count = multiprocessing.cpu_count()
+        default_workers = (2 * cpu_count) + 1
+        workers = int(os.getenv("UVICORN_WORKERS", str(default_workers)))
 
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=settings.LISTEN_PORT,
         workers=workers,
-        loop="uvloop",
         http="httptools",
         reload=False,
         log_level="info",
