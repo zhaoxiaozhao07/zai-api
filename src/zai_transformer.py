@@ -291,15 +291,33 @@ class ZAITransformer:
     async def switch_token(self, http_client=None) -> str:
         """
         切换到下一个token（请求失败时调用）
+        自动处理降级到匿名Token的逻辑
 
         Args:
             http_client: 外部传入的HTTP客户端（如果切换到匿名Token时使用）
 
         Returns:
             str: 下一个Token
+
+        Raises:
+            ValueError: 配置Token和匿名Token都不可用时抛出
         """
         token_pool = await get_token_pool()
         token = await token_pool.switch_to_next()
+
+        # 如果返回 None，说明所有配置 Token 都不可用，降级到匿名 Token
+        if token is None:
+            if settings.ENABLE_GUEST_TOKEN:
+                info_log("[FALLBACK] 配置Token全部失败，降级到匿名Token")
+                await self.clear_anonymous_token_cache()  # 清理缓存，获取新的匿名 Token
+                anonymous_token = await token_pool.get_anonymous_token(http_client)
+                if anonymous_token:
+                    return anonymous_token
+                else:
+                    raise ValueError("[ERROR] 配置Token和匿名Token都不可用")
+            else:
+                raise ValueError("[ERROR] 所有配置Token不可用且匿名Token已禁用")
+
         return token
     
     async def clear_anonymous_token_cache(self):

@@ -188,6 +188,7 @@ response = client.chat.completions.create(
 | `ZAI_SIGNING_SECRET`     | 签名密钥              | `junjie`                                 |
 | `AUTH_TOKEN`             | API Key（客户端认证） | `sk-your-api-key`                        |
 | `LISTEN_PORT`            | 服务监听端口          | `8080`                                   |
+| `UVICORN_WORKERS`        | Uvicorn 工作进程数     | `4`                                      |
 | `ENABLE_GUEST_TOKEN`     | 启用匿名Token功能     | `true`                                   |
 | `GUEST_TOKEN_CACHE_MINUTES` | 匿名Token缓存时间（分钟） | `30`                                      |
 | `ZAI_AUTH_ENDPOINT`      | Z.AI认证API端点       | `https://chat.z.ai/api/v1/auths/`        |

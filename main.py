@@ -55,10 +55,19 @@ async def health():
 
 if __name__ == "__main__":
     import uvicorn
+    import os
+
+    # 根据 CPU 核心数自动设置 workers（默认 4，可通过环境变量覆盖）
+    workers = int(os.getenv("UVICORN_WORKERS", "4"))
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
         port=settings.LISTEN_PORT,
+        workers=workers,
+        loop="uvloop",
+        http="httptools",
         reload=False,
+        log_level="info",
     )
 

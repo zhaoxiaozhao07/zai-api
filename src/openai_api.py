@@ -336,6 +336,20 @@ def calculate_backoff_delay(retry_count: int, status_code: int = None, base_dela
     return final_delay
 
 
+async def mark_token_success_if_configured(transformed: dict):
+    """
+    标记配置 Token 使用成功
+
+    Args:
+        transformed: 转换后的请求字典
+    """
+    from .token_pool import get_token_pool
+    token_pool = await get_token_pool()
+    current_token = transformed.get("token", "")
+    if current_token and not token_pool.is_anonymous_token(current_token):
+        token_pool.mark_token_success(current_token)
+
+
 def process_toolify_detection(toolify_detector, delta_content: str, has_thinking: bool, transformed: dict, request):
     """
     处理工具调用检测
@@ -597,31 +611,31 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                     transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
                                     info_log("[OK] 已获取新的匿名Token并重新生成请求")
                                 else:
-                                    # 配置Token：按原有逻辑处理
-                                    if response.status_code in [400, 401, 405]:
-                                        info_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换到下一个Token")
-                                        new_token = await transformer.switch_token()
-                                        await transformer.refresh_header_template()
-                                        # 重新获取上游地址（可能已切换）
+                                    # 配置Token：标记失败并切换
+                                    token_pool.mark_token_failure(current_token)
+                                    info_log(f"[CONFIG] 配置Token错误 {response.status_code}，切换Token")
+
+                                    # 切换到下一个Token
+                                    new_token = await transformer.switch_token()
+                                    await transformer.refresh_header_template()
+                                    current_upstream = await get_next_upstream()
+                                    transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
+                                    info_log(f"[OK] 已切换到下一个配置Token")
+
+                                    # failover策略下，Token错误也尝试切换上游
+                                    if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                        await switch_upstream_on_failure()
                                         current_upstream = await get_next_upstream()
                                         transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
-                                        info_log(f"[OK] 已切换到下一个配置Token")
+                                        info_log(f"[FAILOVER] Token错误，已切换上游")
 
-                                        # failover策略下，Token错误也尝试切换上游
-                                        if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
-                                            await switch_upstream_on_failure()
-                                            current_upstream = await get_next_upstream()
-                                            transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
-                                            info_log(f"[FAILOVER] Token错误，已切换到新的上游地址")
-
-                                    # 网络错误时尝试切换代理和上游（仅限 failover 策略）
-                                    if response.status_code in [502, 503, 504]:
-                                        if _proxy_list and settings.PROXY_STRATEGY == "failover":
-                                            await switch_proxy_on_failure()
-                                        if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
-                                            await switch_upstream_on_failure()
-                                            # 切换上游后需要重新生成请求
-                                            current_upstream = await get_next_upstream()
+                                # 网络错误时尝试切换代理和上游（仅限 failover 策略）
+                                if response.status_code in [502, 503, 504]:
+                                    if _proxy_list and settings.PROXY_STRATEGY == "failover":
+                                        await switch_proxy_on_failure()
+                                    if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                        await switch_upstream_on_failure()
+                                        current_upstream = await get_next_upstream()
                                             transformed = await transformer.transform_request_in(request_dict_for_transform, client=request_client, upstream_url=current_upstream)
                                             info_log(f"[FAILOVER] 网络错误，已切换到新的上游地址")
                                 
@@ -1090,7 +1104,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         }
                         yield f"data: {json_lib.dumps(finish_chunk)}\n\n"
                         yield "data: [DONE]\n\n"
-                        # 流式响应正常完成
+
+                        # 流式响应正常完成 - 标记 Token 成功
+                        await mark_token_success_if_configured(transformed)
+
                         info_log("[REQUEST] 流式响应完成")
                         return
 
@@ -1293,32 +1310,32 @@ async def handle_non_stream_request(
                             transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
                             info_log("[OK-NONSTREAM] 已获取新的匿名Token并重新生成请求")
                         else:
-                            # 配置Token：按原有逻辑处理
-                            if response.status_code in [400, 401, 405]:
-                                info_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换到下一个Token")
-                                new_token = await transformer.switch_token()
-                                await transformer.refresh_header_template()
-                                # 重新获取上游地址（可能已切换）
+                            # 配置Token：标记失败并切换
+                            token_pool.mark_token_failure(current_token)
+                            info_log(f"[CONFIG-NONSTREAM] 配置Token错误 {response.status_code}，切换Token")
+
+                            # 切换到下一个Token
+                            new_token = await transformer.switch_token()
+                            await transformer.refresh_header_template()
+                            current_upstream = await get_next_upstream()
+                            request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
+                            transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
+                            info_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
+
+                            # failover策略下，Token错误也尝试切换上游
+                            if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                await switch_upstream_on_failure()
                                 current_upstream = await get_next_upstream()
                                 request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
                                 transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
-                                info_log(f"[OK-NONSTREAM] 已切换到下一个配置Token")
+                                info_log(f"[FAILOVER-NONSTREAM] Token错误，已切换上游")
 
-                                # failover策略下，Token错误也尝试切换上游
-                                if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
-                                    await switch_upstream_on_failure()
-                                    current_upstream = await get_next_upstream()
-                                    request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
-                                    transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
-                                    info_log(f"[FAILOVER-NONSTREAM] Token错误，已切换到新的上游地址")
-
-                            # 网络错误时尝试切换代理和上游（仅限 failover 策略）
-                            if response.status_code in [502, 503, 504]:
-                                if _proxy_list and settings.PROXY_STRATEGY == "failover":
-                                    await switch_proxy_on_failure()
-                                if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
-                                    await switch_upstream_on_failure()
-                                    # 切换上游后需要重新生成请求
+                        # 网络错误时尝试切换代理和上游（仅限 failover 策略）
+                        if response.status_code in [502, 503, 504]:
+                            if _proxy_list and settings.PROXY_STRATEGY == "failover":
+                                await switch_proxy_on_failure()
+                            if _upstream_list and settings.UPSTREAM_STRATEGY == "failover":
+                                await switch_upstream_on_failure()
                                     current_upstream = await get_next_upstream()
                                     request_dict = request_dict_for_transform if request_dict_for_transform else request.model_dump()
                                     transformed = await transformer.transform_request_in(request_dict, client=client, upstream_url=current_upstream)
@@ -1480,7 +1497,10 @@ async def handle_non_stream_request(
                     reasoning_length=len(reasoning_content),
                     usage=usage_info
                 )
-                
+
+                # 非流式响应成功 - 标记 Token 成功
+                await mark_token_success_if_configured(transformed)
+
                 # 返回标准OpenAI格式响应
                 return create_openai_response(
                     transformed["body"]["chat_id"],
