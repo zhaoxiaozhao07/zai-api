@@ -437,6 +437,7 @@ async def list_models():
             Model(id=settings.GLM_46_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46_THINKING_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46_SEARCH_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=settings.GLM_46_ADVANCED_SEARCH_MODEL, created=current_time, owned_by="z.ai"),
         ]
     )
     return response
@@ -663,189 +664,34 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                         yielded_chunks_count = 0  # 统计yield的chunk数量
                         usage_info = None  # 暂存usage信息
 
-                        # 处理SSE流 - 使用 aiter_lines() 自动处理行分割
-                        buffer = ""
+                        # 处理SSE流 - 直接使用 aiter_lines() 实时输出
                         line_count = 0
                         debug_log("开始迭代SSE流...")
 
                         async for line in response.aiter_lines():
                             line_count += 1
-                            if not line:
+                            if not line or not line.strip():
                                 continue
-                            
+
                             debug_log(f"[RAW-LINE-{line_count}] 长度: {len(line)}, 开头: {repr(line[:50]) if len(line) > 0 else 'EMPTY'}")
 
-                            # 累积到buffer处理完整的数据行
-                            buffer += line + "\n"
+                            # 直接处理每一行，不累积 buffer
+                            if line.startswith("data:"):
+                                chunk_str = line[5:].strip()
+                                debug_log(f"[SSE-RAW] 收到数据行，长度: {len(chunk_str)}, 预览: {chunk_str[:100] if chunk_str else 'empty'}")
+                                if not chunk_str or chunk_str == "[DONE]":
+                                    if chunk_str == "[DONE]":
+                                        debug_log("[SSE-RAW] 收到 [DONE] 信号")
+                                        # 流结束，检查是否有工具调用
+                                        if toolify_detector:
+                                            debug_log(f"[TOOLIFY] 流结束，检测器状态: {toolify_detector.state}, 缓冲区长度: {len(toolify_detector.content_buffer)}")
+                                            debug_log(f"[TOOLIFY] 缓冲区内容: {repr(toolify_detector.content_buffer[:500])}")
+                                            parsed_tools, remaining_content = toolify_detector.finalize()
+                                            debug_log(f"[TOOLIFY] finalize()结果: tools={parsed_tools}, remaining={repr(remaining_content[:100]) if remaining_content else 'empty'}")
 
-                            # 检查是否有完整的data行
-                            while "\n" in buffer:
-                                current_line, buffer = buffer.split("\n", 1)
-                                if not current_line.strip():
-                                    continue
-
-                                if current_line.startswith("data:"):
-                                    chunk_str = current_line[5:].strip()
-                                    debug_log(f"[SSE-RAW] 收到数据行，长度: {len(chunk_str)}, 预览: {chunk_str[:100] if chunk_str else 'empty'}")
-                                    if not chunk_str or chunk_str == "[DONE]":
-                                            if chunk_str == "[DONE]":
-                                                debug_log("[SSE-RAW] 收到 [DONE] 信号")
-                                                # 流结束，检查是否有工具调用
-                                                if toolify_detector:
-                                                    debug_log(f"[TOOLIFY] 流结束，检测器状态: {toolify_detector.state}, 缓冲区长度: {len(toolify_detector.content_buffer)}")
-                                                    debug_log(f"[TOOLIFY] 缓冲区内容: {repr(toolify_detector.content_buffer[:500])}")
-                                                    parsed_tools, remaining_content = toolify_detector.finalize()
-                                                    debug_log(f"[TOOLIFY] finalize()结果: tools={parsed_tools}, remaining={repr(remaining_content[:100]) if remaining_content else 'empty'}")
-                                                    
-                                                    # 先输出剩余的内容（如果有）
-                                                    if remaining_content:
-                                                        debug_log(f"[TOOLIFY] 输出缓冲区剩余内容: {len(remaining_content)}字符")
-                                                        if not has_thinking:
-                                                            has_thinking = True
-                                                            role_chunk = {
-                                                                "choices": [{
-                                                                    "delta": {"role": "assistant"},
-                                                                    "finish_reason": None,
-                                                                    "index": 0,
-                                                                    "logprobs": None,
-                                                                }],
-                                                                "created": int(time.time()),
-                                                                "id": transformed["body"]["chat_id"],
-                                                                "model": request.model,
-                                                                "object": "chat.completion.chunk",
-                                                                "system_fingerprint": "fp_zai_001",
-                                                            }
-                                                            yield f"data: {json_lib.dumps(role_chunk)}\n\n"
-                                                        
-                                                        content_chunk = {
-                                                            "choices": [{
-                                                                "delta": {"content": remaining_content},
-                                                                "finish_reason": None,
-                                                                "index": 0,
-                                                                "logprobs": None,
-                                                            }],
-                                                            "created": int(time.time()),
-                                                            "id": transformed["body"]["chat_id"],
-                                                            "model": request.model,
-                                                            "object": "chat.completion.chunk",
-                                                            "system_fingerprint": "fp_zai_001",
-                                                        }
-                                                        yield f"data: {json_lib.dumps(content_chunk)}\n\n"
-                                                    
-                                                    # 然后处理工具调用
-                                                    if parsed_tools:
-                                                        debug_log("[TOOLIFY] 流结束时检测到工具调用")
-                                                        from .toolify_handler import format_toolify_response_for_stream
-                                                        tool_chunks = format_toolify_response_for_stream(
-                                                            parsed_tools, 
-                                                            request.model, 
-                                                            transformed["body"]["chat_id"]
-                                                        )
-                                                        for chunk in tool_chunks:
-                                                            yield chunk
-                                                        # 检测到工具调用后提前结束
-                                                        info_log("[REQUEST] 流式响应（早期工具调用检测）完成")
-                                                        return
-                                                    else:
-                                                        debug_log("[TOOLIFY] finalize()未检测到工具调用")
-                                                yield "data: [DONE]\n\n"
-                                            continue
-
-                                    try:
-                                        chunk_data = json_lib.loads(chunk_str)
-                                        debug_log(f"[SSE-JSON] 解析成功，type: {chunk_data.get('type')}")
-
-                                        if chunk_data.get("type") == "chat:completion":
-                                            data = chunk_data.get("data", {})
-                                            phase = data.get("phase")
-                                            debug_log(f"[SSE] 处理块: type={chunk_data.get('type')}, phase={phase}, has_delta={bool(data.get('delta_content'))}, has_usage={bool(data.get('usage'))}")
-
-                                            # 处理tool_call阶段（提取搜索信息）
-                                            if phase == "tool_call":
-                                                edit_content = data.get("edit_content", "")
-                                                
-                                                # 提取搜索查询信息
-                                                if edit_content and "<glm_block" in edit_content and "search" in edit_content:
-                                                    # 尝试从edit_content中提取搜索查询
-                                                    try:
-                                                        import re
-                                                        # 先尝试直接解码Unicode
-                                                        decoded = edit_content
-                                                        try:
-                                                            # 解码\uXXXX格式的Unicode字符
-                                                            decoded = edit_content.encode('utf-8').decode('unicode_escape').encode('latin1').decode('utf-8')
-                                                        except:
-                                                            # 如果解码失败，尝试其他方法
-                                                            try:
-                                                                import codecs
-                                                                decoded = codecs.decode(edit_content, 'unicode_escape')
-                                                            except:
-                                                                pass
-                                                        
-                                                        # 提取queries数组
-                                                        queries_match = re.search(r'"queries":\s*\[(.*?)\]', decoded)
-                                                        if queries_match:
-                                                            queries_str = queries_match.group(1)
-                                                            # 提取所有引号内的内容
-                                                            queries = re.findall(r'"([^"]+)"', queries_str)
-                                                            if queries:
-                                                                search_info = "🔍 **搜索：** " + "　".join(queries[:5])  # 最多显示5个查询
-                                                                
-                                                                if not has_thinking:
-                                                                    has_thinking = True
-                                                                    role_chunk = {
-                                                                        "choices": [{
-                                                                            "delta": {"role": "assistant"},
-                                                                            "finish_reason": None,
-                                                                            "index": 0,
-                                                                            "logprobs": None,
-                                                                        }],
-                                                                        "created": int(time.time()),
-                                                                        "id": transformed["body"]["chat_id"],
-                                                                        "model": request.model,
-                                                                        "object": "chat.completion.chunk",
-                                                                        "system_fingerprint": "fp_zai_001",
-                                                                    }
-                                                                    yield f"data: {json_lib.dumps(role_chunk)}\n\n"
-                                                                
-                                                                search_chunk = {
-                                                                    "choices": [{
-                                                                        "delta": {"content": f"\n\n{search_info}\n\n"},
-                                                                        "finish_reason": None,
-                                                                        "index": 0,
-                                                                        "logprobs": None,
-                                                                    }],
-                                                                    "created": int(time.time()),
-                                                                    "id": transformed["body"]["chat_id"],
-                                                                    "model": request.model,
-                                                                    "object": "chat.completion.chunk",
-                                                                    "system_fingerprint": "fp_zai_001",
-                                                                }
-                                                                yielded_chunks_count += 1
-                                                                debug_log(f"[YIELD] search info chunk #{yielded_chunks_count}, queries: {queries}")
-                                                                yield f"data: {json_lib.dumps(search_chunk)}\n\n"
-                                                    except Exception as e:
-                                                        debug_log(f"[SSE-TOOL_CALL] 提取搜索信息失败: {e}")
-                                                
-                                                # 如果不是usage信息，跳过其他tool_call内容
-                                                if not data.get("usage"):
-                                                    debug_log(f"[SSE-TOOL_CALL] 跳过tool_call阶段的其他内容")
-                                                    continue
-                                            
-                                            # 处理思考内容
-                                            if phase == "thinking":
-                                                delta_content = data.get("delta_content", "")
-                                                debug_log(f"[SSE-THINKING] delta_content长度: {len(delta_content) if delta_content else 0}, 内容: {repr(delta_content[:50]) if delta_content else 'EMPTY'}")
-
-                                                # 工具调用检测（使用提取的函数）
-                                                chunks, should_continue, delta_content, has_thinking = process_toolify_detection(
-                                                    toolify_detector, delta_content, has_thinking, transformed, request
-                                                )
-                                                for chunk in chunks:
-                                                    yield chunk
-                                                if should_continue:
-                                                    continue
-                                                
+                                            # 先输出剩余的内容（如果有）
+                                            if remaining_content:
+                                                debug_log(f"[TOOLIFY] 输出缓冲区剩余内容: {len(remaining_content)}字符")
                                                 if not has_thinking:
                                                     has_thinking = True
                                                     role_chunk = {
@@ -863,27 +709,228 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     }
                                                     yield f"data: {json_lib.dumps(role_chunk)}\n\n"
 
-                                                if delta_content:
-                                                    if delta_content.startswith("<details"):
-                                                        content = (
-                                                            delta_content.split("</summary>\n>")[-1].strip()
-                                                            if "</summary>\n>" in delta_content
-                                                            else delta_content
-                                                        )
-                                                    else:
-                                                        content = delta_content
-                                                    
-                                                    if first_thinking_chunk:
-                                                        formatted_content = f"<think>{content}"
-                                                        first_thinking_chunk = False
-                                                    else:
-                                                        formatted_content = content
+                                                content_chunk = {
+                                                    "choices": [{
+                                                        "delta": {"content": remaining_content},
+                                                        "finish_reason": None,
+                                                        "index": 0,
+                                                        "logprobs": None,
+                                                    }],
+                                                    "created": int(time.time()),
+                                                    "id": transformed["body"]["chat_id"],
+                                                    "model": request.model,
+                                                    "object": "chat.completion.chunk",
+                                                    "system_fingerprint": "fp_zai_001",
+                                                }
+                                                yield f"data: {json_lib.dumps(content_chunk)}\n\n"
 
-                                                    thinking_chunk = {
+                                            # 然后处理工具调用
+                                            if parsed_tools:
+                                                debug_log("[TOOLIFY] 流结束时检测到工具调用")
+                                                from .toolify_handler import format_toolify_response_for_stream
+                                                tool_chunks = format_toolify_response_for_stream(
+                                                    parsed_tools,
+                                                    request.model,
+                                                    transformed["body"]["chat_id"]
+                                                )
+                                                for chunk in tool_chunks:
+                                                    yield chunk
+                                                # 检测到工具调用后提前结束
+                                                info_log("[REQUEST] 流式响应（早期工具调用检测）完成")
+                                                return
+                                            else:
+                                                debug_log("[TOOLIFY] finalize()未检测到工具调用")
+                                        yield "data: [DONE]\n\n"
+                                    continue
+
+                                try:
+                                    chunk_data = json_lib.loads(chunk_str)
+                                    debug_log(f"[SSE-JSON] 解析成功，type: {chunk_data.get('type')}")
+
+                                    if chunk_data.get("type") == "chat:completion":
+                                        data = chunk_data.get("data", {})
+                                        phase = data.get("phase")
+                                        debug_log(f"[SSE] 处理块: type={chunk_data.get('type')}, phase={phase}, has_delta={bool(data.get('delta_content'))}, has_usage={bool(data.get('usage'))}")
+
+                                        # 处理tool_call阶段（提取搜索信息）
+                                        if phase == "tool_call":
+                                            edit_content = data.get("edit_content", "")
+
+                                            # 提取搜索查询信息
+                                            if edit_content and "<glm_block" in edit_content and "search" in edit_content:
+                                                # 尝试从edit_content中提取搜索查询
+                                                try:
+                                                    import re
+                                                    # 先尝试直接解码Unicode
+                                                    decoded = edit_content
+                                                    try:
+                                                        # 解码\uXXXX格式的Unicode字符
+                                                        decoded = edit_content.encode('utf-8').decode('unicode_escape').encode('latin1').decode('utf-8')
+                                                    except:
+                                                        # 如果解码失败，尝试其他方法
+                                                        try:
+                                                            import codecs
+                                                            decoded = codecs.decode(edit_content, 'unicode_escape')
+                                                        except:
+                                                            pass
+
+                                                    # 提取queries数组
+                                                    queries_match = re.search(r'"queries":\s*\[(.*?)\]', decoded)
+                                                    if queries_match:
+                                                        queries_str = queries_match.group(1)
+                                                        # 提取所有引号内的内容
+                                                        queries = re.findall(r'"([^"]+)"', queries_str)
+                                                        if queries:
+                                                            search_info = "🔍 **搜索：** " + "　".join(queries[:5])  # 最多显示5个查询
+
+                                                            if not has_thinking:
+                                                                has_thinking = True
+                                                                role_chunk = {
+                                                                    "choices": [{
+                                                                        "delta": {"role": "assistant"},
+                                                                        "finish_reason": None,
+                                                                        "index": 0,
+                                                                        "logprobs": None,
+                                                                    }],
+                                                                    "created": int(time.time()),
+                                                                    "id": transformed["body"]["chat_id"],
+                                                                    "model": request.model,
+                                                                    "object": "chat.completion.chunk",
+                                                                    "system_fingerprint": "fp_zai_001",
+                                                                }
+                                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
+
+                                                            search_chunk = {
+                                                                "choices": [{
+                                                                    "delta": {"content": f"\n\n{search_info}\n\n"},
+                                                                    "finish_reason": None,
+                                                                    "index": 0,
+                                                                    "logprobs": None,
+                                                                }],
+                                                                "created": int(time.time()),
+                                                                "id": transformed["body"]["chat_id"],
+                                                                "model": request.model,
+                                                                "object": "chat.completion.chunk",
+                                                                "system_fingerprint": "fp_zai_001",
+                                                            }
+                                                            yielded_chunks_count += 1
+                                                            debug_log(f"[YIELD] search info chunk #{yielded_chunks_count}, queries: {queries}")
+                                                            yield f"data: {json_lib.dumps(search_chunk)}\n\n"
+                                                except Exception as e:
+                                                    debug_log(f"[SSE-TOOL_CALL] 提取搜索信息失败: {e}")
+
+                                            # 如果不是usage信息，跳过其他tool_call内容
+                                            if not data.get("usage"):
+                                                debug_log(f"[SSE-TOOL_CALL] 跳过tool_call阶段的其他内容")
+                                                continue
+
+                                        # 处理思考内容
+                                        if phase == "thinking":
+                                            delta_content = data.get("delta_content", "")
+                                            debug_log(f"[SSE-THINKING] delta_content长度: {len(delta_content) if delta_content else 0}, 内容: {repr(delta_content[:50]) if delta_content else 'EMPTY'}")
+
+                                            # 工具调用检测（使用提取的函数）
+                                            chunks, should_continue, delta_content, has_thinking = process_toolify_detection(
+                                                toolify_detector, delta_content, has_thinking, transformed, request
+                                            )
+                                            for chunk in chunks:
+                                                yield chunk
+                                            if should_continue:
+                                                continue
+
+                                            if not has_thinking:
+                                                has_thinking = True
+                                                role_chunk = {
+                                                    "choices": [{
+                                                        "delta": {"role": "assistant"},
+                                                        "finish_reason": None,
+                                                        "index": 0,
+                                                        "logprobs": None,
+                                                    }],
+                                                    "created": int(time.time()),
+                                                    "id": transformed["body"]["chat_id"],
+                                                    "model": request.model,
+                                                    "object": "chat.completion.chunk",
+                                                    "system_fingerprint": "fp_zai_001",
+                                                }
+                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
+
+                                            if delta_content:
+                                                if delta_content.startswith("<details"):
+                                                    content = (
+                                                        delta_content.split("</summary>\n>")[-1].strip()
+                                                        if "</summary>\n>" in delta_content
+                                                        else delta_content
+                                                    )
+                                                else:
+                                                    content = delta_content
+
+                                                if first_thinking_chunk:
+                                                    formatted_content = f"<think>{content}"
+                                                    first_thinking_chunk = False
+                                                else:
+                                                    formatted_content = content
+
+                                                thinking_chunk = {
+                                                    "choices": [{
+                                                        "delta": {
+                                                            "role": "assistant",
+                                                            "content": formatted_content,
+                                                        },
+                                                        "finish_reason": None,
+                                                        "index": 0,
+                                                        "logprobs": None,
+                                                    }],
+                                                    "created": int(time.time()),
+                                                    "id": transformed["body"]["chat_id"],
+                                                    "model": request.model,
+                                                    "object": "chat.completion.chunk",
+                                                    "system_fingerprint": "fp_zai_001",
+                                                }
+                                                yielded_chunks_count += 1
+                                                debug_log(f"[YIELD] thinking chunk #{yielded_chunks_count}, content长度: {len(formatted_content)}")
+                                                yield f"data: {json_lib.dumps(thinking_chunk)}\n\n"
+
+                                        # 处理答案内容
+                                        elif phase == "answer":
+                                            edit_content = data.get("edit_content", "")
+                                            delta_content = data.get("delta_content", "")
+                                            debug_log(f"[SSE-ANSWER] delta_content长度: {len(delta_content) if delta_content else 0}, edit_content长度: {len(edit_content) if edit_content else 0}")
+
+                                            # 工具调用检测（使用提取的函数）
+                                            chunks, should_continue, delta_content, has_thinking = process_toolify_detection(
+                                                toolify_detector, delta_content, has_thinking, transformed, request
+                                            )
+                                            for chunk in chunks:
+                                                yield chunk
+                                            if should_continue:
+                                                continue
+
+                                            if not has_thinking:
+                                                has_thinking = True
+                                                role_chunk = {
+                                                    "choices": [{
+                                                        "delta": {"role": "assistant"},
+                                                        "finish_reason": None,
+                                                        "index": 0,
+                                                        "logprobs": None,
+                                                    }],
+                                                    "created": int(time.time()),
+                                                    "id": transformed["body"]["chat_id"],
+                                                    "model": request.model,
+                                                    "object": "chat.completion.chunk",
+                                                    "system_fingerprint": "fp_zai_001",
+                                                }
+                                                yield f"data: {json_lib.dumps(role_chunk)}\n\n"
+
+                                            # 处理思考结束和答案开始
+                                            if edit_content and "</details>\n" in edit_content:
+                                                if has_thinking and not first_thinking_chunk:
+                                                    sig_chunk = {
                                                         "choices": [{
                                                             "delta": {
                                                                 "role": "assistant",
-                                                                "content": formatted_content,
+                                                                "content": "</think>",
                                                             },
                                                             "finish_reason": None,
                                                             "index": 0,
@@ -895,25 +942,29 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                         "object": "chat.completion.chunk",
                                                         "system_fingerprint": "fp_zai_001",
                                                     }
-                                                    yielded_chunks_count += 1
-                                                    debug_log(f"[YIELD] thinking chunk #{yielded_chunks_count}, content长度: {len(formatted_content)}")
-                                                    yield f"data: {json_lib.dumps(thinking_chunk)}\n\n"
+                                                    yield f"data: {json_lib.dumps(sig_chunk)}\n\n"
 
-                                            # 处理答案内容
-                                            elif phase == "answer":
-                                                edit_content = data.get("edit_content", "")
-                                                delta_content = data.get("delta_content", "")
-                                                debug_log(f"[SSE-ANSWER] delta_content长度: {len(delta_content) if delta_content else 0}, edit_content长度: {len(edit_content) if edit_content else 0}")
+                                                content_after = edit_content.split("</details>\n")[-1]
+                                                if content_after:
+                                                    content_chunk = {
+                                                        "choices": [{
+                                                            "delta": {
+                                                                "role": "assistant",
+                                                                "content": content_after,
+                                                            },
+                                                            "finish_reason": None,
+                                                            "index": 0,
+                                                            "logprobs": None,
+                                                        }],
+                                                        "created": int(time.time()),
+                                                        "id": transformed["body"]["chat_id"],
+                                                        "model": request.model,
+                                                        "object": "chat.completion.chunk",
+                                                        "system_fingerprint": "fp_zai_001",
+                                                    }
+                                                    yield f"data: {json_lib.dumps(content_chunk)}\n\n"
 
-                                                # 工具调用检测（使用提取的函数）
-                                                chunks, should_continue, delta_content, has_thinking = process_toolify_detection(
-                                                    toolify_detector, delta_content, has_thinking, transformed, request
-                                                )
-                                                for chunk in chunks:
-                                                    yield chunk
-                                                if should_continue:
-                                                    continue
-
+                                            elif delta_content:
                                                 if not has_thinking:
                                                     has_thinking = True
                                                     role_chunk = {
@@ -931,98 +982,39 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                     }
                                                     yield f"data: {json_lib.dumps(role_chunk)}\n\n"
 
-                                                # 处理思考结束和答案开始
-                                                if edit_content and "</details>\n" in edit_content:
-                                                    if has_thinking and not first_thinking_chunk:
-                                                        sig_chunk = {
-                                                            "choices": [{
-                                                                "delta": {
-                                                                    "role": "assistant",
-                                                                    "content": "</think>",
-                                                                },
-                                                                "finish_reason": None,
-                                                                "index": 0,
-                                                                "logprobs": None,
-                                                            }],
-                                                            "created": int(time.time()),
-                                                            "id": transformed["body"]["chat_id"],
-                                                            "model": request.model,
-                                                            "object": "chat.completion.chunk",
-                                                            "system_fingerprint": "fp_zai_001",
-                                                        }
-                                                        yield f"data: {json_lib.dumps(sig_chunk)}\n\n"
+                                                content_chunk = {
+                                                    "choices": [{
+                                                        "delta": {"content": delta_content},
+                                                        "finish_reason": None,
+                                                        "index": 0,
+                                                        "logprobs": None,
+                                                    }],
+                                                    "created": int(time.time()),
+                                                    "id": transformed["body"]["chat_id"],
+                                                    "model": request.model,
+                                                    "object": "chat.completion.chunk",
+                                                    "system_fingerprint": "fp_zai_001",
+                                                }
+                                                yielded_chunks_count += 1
+                                                debug_log(f"[YIELD] answer chunk #{yielded_chunks_count}, content长度: {len(delta_content)}")
+                                                yield f"data: {json_lib.dumps(content_chunk)}\n\n"
 
-                                                    content_after = edit_content.split("</details>\n")[-1]
-                                                    if content_after:
-                                                        content_chunk = {
-                                                            "choices": [{
-                                                                "delta": {
-                                                                    "role": "assistant",
-                                                                    "content": content_after,
-                                                                },
-                                                                "finish_reason": None,
-                                                                "index": 0,
-                                                                "logprobs": None,
-                                                            }],
-                                                            "created": int(time.time()),
-                                                            "id": transformed["body"]["chat_id"],
-                                                            "model": request.model,
-                                                            "object": "chat.completion.chunk",
-                                                            "system_fingerprint": "fp_zai_001",
-                                                        }
-                                                        yield f"data: {json_lib.dumps(content_chunk)}\n\n"
+                                        # 暂存usage信息，但不立即结束（可能后面还有answer内容）
+                                        if data.get("usage"):
+                                            debug_log("[SSE] 收到usage信息，暂存但继续处理")
+                                            # 暂存usage信息
+                                            usage_info = data["usage"]
+                                            # 不要在这里return，继续处理后续chunks
 
-                                                elif delta_content:
-                                                    if not has_thinking:
-                                                        has_thinking = True
-                                                        role_chunk = {
-                                                            "choices": [{
-                                                                "delta": {"role": "assistant"},
-                                                                "finish_reason": None,
-                                                                "index": 0,
-                                                                "logprobs": None,
-                                                            }],
-                                                            "created": int(time.time()),
-                                                            "id": transformed["body"]["chat_id"],
-                                                            "model": request.model,
-                                                            "object": "chat.completion.chunk",
-                                                            "system_fingerprint": "fp_zai_001",
-                                                        }
-                                                        yield f"data: {json_lib.dumps(role_chunk)}\n\n"
-
-                                                    content_chunk = {
-                                                        "choices": [{
-                                                            "delta": {"content": delta_content},
-                                                            "finish_reason": None,
-                                                            "index": 0,
-                                                            "logprobs": None,
-                                                        }],
-                                                        "created": int(time.time()),
-                                                        "id": transformed["body"]["chat_id"],
-                                                        "model": request.model,
-                                                        "object": "chat.completion.chunk",
-                                                        "system_fingerprint": "fp_zai_001",
-                                                    }
-                                                    yielded_chunks_count += 1
-                                                    debug_log(f"[YIELD] answer chunk #{yielded_chunks_count}, content长度: {len(delta_content)}")
-                                                    yield f"data: {json_lib.dumps(content_chunk)}\n\n"
-
-                                            # 暂存usage信息，但不立即结束（可能后面还有answer内容）
-                                            if data.get("usage"):
-                                                debug_log("[SSE] 收到usage信息，暂存但继续处理")
-                                                # 暂存usage信息
-                                                usage_info = data["usage"]
-                                                # 不要在这里return，继续处理后续chunks
-
-                                    except json.JSONDecodeError as e:
-                                        debug_log(
-                                            "JSON解析错误",
-                                            error=str(e),
-                                            json_length=len(chunk_str),
-                                            json_preview=chunk_str[:100] if len(chunk_str) > 100 else chunk_str
-                                        )
-                                    except Exception as e:
-                                        debug_log("处理chunk错误", error=str(e))
+                                except json.JSONDecodeError as e:
+                                    debug_log(
+                                        "JSON解析错误",
+                                        error=str(e),
+                                        json_length=len(chunk_str),
+                                        json_preview=chunk_str[:100] if len(chunk_str) > 100 else chunk_str
+                                    )
+                                except Exception as e:
+                                    debug_log("处理chunk错误", error=str(e))
 
                         debug_log("SSE 流处理完成", line_count=line_count, yielded_chunks=yielded_chunks_count)
                         

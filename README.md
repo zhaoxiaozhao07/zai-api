@@ -200,6 +200,7 @@ response = client.chat.completions.create(
 | `GLM_46_MODEL`           | GLM-4.6 模型名称      | `GLM-4.6`                                |
 | `GLM_46_THINKING_MODEL`  | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
 | `GLM_46_SEARCH_MODEL`    | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
+| `GLM_46_ADVANCED_SEARCH_MODEL` | GLM-4.6 高级模型     | `GLM-4.6-Advanced-Search`                       |
 | `ENABLE_TOOLIFY`         | 启用工具调用功能      | `true`                                   |
 | `TOOLIFY_CUSTOM_PROMPT`  | 自定义工具调用提示词  | -                                        |
 | `DEBUG_LOGGING`          | 详细日志输出          | `true`                                   |

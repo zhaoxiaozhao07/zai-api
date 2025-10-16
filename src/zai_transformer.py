@@ -472,11 +472,12 @@ class ZAITransformer:
 
         # 确定请求的模型特性
         requested_model = request.get("model", settings.PRIMARY_MODEL)
-        is_thinking = (requested_model == settings.THINKING_MODEL or 
-                      requested_model == settings.GLM_46_THINKING_MODEL or 
+        is_thinking = (requested_model == settings.THINKING_MODEL or
+                      requested_model == settings.GLM_46_THINKING_MODEL or
                       request.get("reasoning", False))
-        is_search = (requested_model == settings.SEARCH_MODEL or 
+        is_search = (requested_model == settings.SEARCH_MODEL or
                     requested_model == settings.GLM_46_SEARCH_MODEL)
+        is_advanced_search = (requested_model == settings.GLM_46_ADVANCED_SEARCH_MODEL)
         is_vision_model = (requested_model == settings.GLM_45V_MODEL)
 
         # 获取上游模型ID
@@ -490,7 +491,10 @@ class ZAITransformer:
 
         # 构建MCP服务器列表
         mcp_servers = []
-        if is_search:
+        if is_advanced_search:
+            mcp_servers.append("advanced-search")
+            debug_log(f"🔍 检测到高级搜索模型，添加 advanced-search MCP 服务器")
+        elif is_search:
             mcp_servers.append("deep-web-search")
             debug_log(f"🔍 检测到搜索模型，添加 deep-web-search MCP 服务器")
         
@@ -557,9 +561,9 @@ class ZAITransformer:
             "params": {},
             "features": {
                 "image_generation": False,
-                "web_search": False,  # 注意：通过mcp_servers控制搜索，而不是这个标志
-                "auto_web_search": False,
-                "preview_mode": True,  # 修改为True
+                "web_search": is_search or is_advanced_search,
+                "auto_web_search": is_search or is_advanced_search,
+                "preview_mode": is_search or is_advanced_search,
                 "flags": [],
                 "features": hidden_mcp_features,
                 "enable_thinking": is_thinking,
