@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     # Z.AI Token Configuration
     ZAI_TOKEN: str = os.getenv("ZAI_TOKEN", "")
     ZAI_SIGNING_SECRET: str = os.getenv("ZAI_SIGNING_SECRET", "junjie")
-    ZAI_FE_VERSION: str = os.getenv("ZAI_FE_VERSION", "prod-fe-1.0.78")
+    ZAI_FE_VERSION: str = os.getenv("ZAI_FE_VERSION", "prod-fe-1.0.99")
     
     # Anonymous Token Configuration - 匿名Token配置
     ENABLE_GUEST_TOKEN: bool = os.getenv("ENABLE_GUEST_TOKEN", "true").lower() == "true"
