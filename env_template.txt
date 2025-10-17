@@ -40,6 +40,10 @@ ZAI_AUTH_ENDPOINT=https://chat.z.ai/api/v1/auths/
 # 服务器配置
 LISTEN_PORT=8080
 
+# Uvicorn 工作进程数（默认4，建议设置为CPU核心数）
+# 多进程模式可显著提升并发性能
+UVICORN_WORKERS=4
+
 # 日志级别配置：false（不输出）、info（基本信息）、debug（详细调试信息，包括流式输出）
 LOG_LEVEL=info
 
@@ -104,6 +108,7 @@ GLM_45V_MODEL=GLM-4.5V
 GLM_46_MODEL=GLM-4.6
 GLM_46_THINKING_MODEL=GLM-4.6-Thinking
 GLM_46_SEARCH_MODEL=GLM-4.6-Search
+GLM_46_ADVANCED_SEARCH_MODEL=GLM-4.6-advanced-search
 
 
 

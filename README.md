@@ -188,6 +188,7 @@ response = client.chat.completions.create(
 | `ZAI_SIGNING_SECRET`     | 签名密钥              | `junjie`                                 |
 | `AUTH_TOKEN`             | API Key（客户端认证） | `sk-your-api-key`                        |
 | `LISTEN_PORT`            | 服务监听端口          | `8080`                                   |
+| `UVICORN_WORKERS`        | Uvicorn 工作进程数     | `4`                                      |
 | `ENABLE_GUEST_TOKEN`     | 启用匿名Token功能     | `true`                                   |
 | `GUEST_TOKEN_CACHE_MINUTES` | 匿名Token缓存时间（分钟） | `30`                                      |
 | `ZAI_AUTH_ENDPOINT`      | Z.AI认证API端点       | `https://chat.z.ai/api/v1/auths/`        |
@@ -199,6 +200,7 @@ response = client.chat.completions.create(
 | `GLM_46_MODEL`           | GLM-4.6 模型名称      | `GLM-4.6`                                |
 | `GLM_46_THINKING_MODEL`  | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
 | `GLM_46_SEARCH_MODEL`    | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
+| `GLM_46_ADVANCED_SEARCH_MODEL` | GLM-4.6 高级模型     | `GLM-4.6-Advanced-Search`                       |
 | `ENABLE_TOOLIFY`         | 启用工具调用功能      | `true`                                   |
 | `TOOLIFY_CUSTOM_PROMPT`  | 自定义工具调用提示词  | -                                        |
 | `DEBUG_LOGGING`          | 详细日志输出          | `true`                                   |

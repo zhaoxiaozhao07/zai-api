@@ -8,11 +8,32 @@ Token池管理模块 - 支持配置Token和匿名Token的智能降级
 import os
 import asyncio
 import random
+import time
+import threading
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from .helpers import error_log, info_log, debug_log
 from .config import settings
+
+
+@dataclass
+class TokenStatus:
+    """Token 运行时状态"""
+    token: str
+    is_available: bool = True
+    failure_count: int = 0
+    last_failure_time: float = 0.0
+    total_requests: int = 0
+    successful_requests: int = 0
+
+    @property
+    def success_rate(self) -> float:
+        """成功率"""
+        if self.total_requests == 0:
+            return 1.0
+        return self.successful_requests / self.total_requests
 
 
 def get_zai_dynamic_headers(chat_id: str = "") -> Dict[str, str]:
@@ -72,22 +93,28 @@ def get_zai_dynamic_headers(chat_id: str = "") -> Dict[str, str]:
 
 class TokenPool:
     """Token池管理类 - 支持配置Token和匿名Token的智能降级"""
-    
+
     def __init__(self):
         """初始化Token池"""
         self.tokens: List[str] = []
         self.current_index: int = 0
         self.current_token: Optional[str] = None
         self.anonymous_mode: bool = False
-        
+
         # 匿名Token缓存
         self._anonymous_token: Optional[str] = None
         self._anonymous_token_expires_at: Optional[datetime] = None
         self._fetch_lock = asyncio.Lock()
-        
+
         # Token轮询锁 - 防止并发切换导致的竞态条件
         self._switch_lock = asyncio.Lock()
-        
+
+        # Token 状态跟踪
+        self.token_statuses: Dict[str, TokenStatus] = {}
+        self.failure_threshold: int = 3  # 失败 3 次后禁用
+        self._in_fallback: bool = False  # 降级模式标志
+        self._status_lock = threading.Lock()  # 状态修改锁（同步锁，用于非异步方法）
+
         self._load_tokens()
     
     def _load_tokens(self):
@@ -121,17 +148,30 @@ class TokenPool:
         
         # 去重后的token列表
         self.tokens = list(token_set)
-        
+
         if self.tokens:
             # 有配置的token
-            self.current_token = self.tokens[0]
-            self.current_index = 0
             self.anonymous_mode = False
             info_log(f"[OK] Token池初始化完成，共 {len(self.tokens)} 个唯一token")
+
+            # 初始化 Token 状态（会设置 current_token 和 current_index）
+            self._init_token_statuses()
         else:
             # 没有配置token，启用匿名模式
             self.anonymous_mode = True
             info_log("[INFO] Token池为空，启用纯匿名Token模式")
+
+    def _init_token_statuses(self):
+        """初始化 Token 状态"""
+        for token in self.tokens:
+            self.token_statuses[token] = TokenStatus(token=token)
+
+        # 设置第一个可用的 Token 为当前 Token
+        if self.tokens:
+            self.current_token = self.tokens[0]
+            self.current_index = 0
+
+        debug_log(f"[TOKEN] 初始化了 {len(self.token_statuses)} 个 Token 状态")
     
     async def _fetch_anonymous_token(self, http_client=None) -> Optional[str]:
         """
@@ -269,7 +309,7 @@ class TokenPool:
     async def clear_anonymous_token_cache(self):
         """
         清理匿名Token缓存（当Token失效时调用）
-        线程安全版本，使用异步锁保护
+        异步锁保护
         """
         async with self._fetch_lock:  # 使用同一个锁，防止清理和获取的竞态条件
             debug_log("[CACHE] 安全清理匿名Token缓存")
@@ -284,7 +324,7 @@ class TokenPool:
     async def get_token(self, http_client=None) -> str:
         """
         获取Token（智能降级策略）
-        优先级：配置Token → 匿名Token → 缓存Token
+        优先级：可用的配置Token → 匿名Token
 
         Args:
             http_client: 外部传入的HTTP客户端（可选）
@@ -295,13 +335,15 @@ class TokenPool:
         Raises:
             ValueError: 所有Token获取方式都失败时抛出
         """
-        # 策略1: 如果有配置的Token，优先使用（使用锁保护读取，避免与switch_to_next并发）
+        # 策略1: 如果有配置的Token且当前Token可用，优先使用
         async with self._switch_lock:
-            if self.tokens and self.current_token:
+            if (self.tokens and self.current_token and
+                self.current_token in self.token_statuses and
+                self.token_statuses[self.current_token].is_available):
                 debug_log(f"[TOKEN] 使用配置Token (索引: {self.current_index}/{len(self.tokens)})")
                 return self.current_token
 
-        # 策略2: 没有配置Token或Token失效，使用匿名Token
+        # 策略2: 没有配置Token或当前Token不可用，使用匿名Token
         if settings.ENABLE_GUEST_TOKEN:
             info_log("[TOKEN] 配置Token不可用，尝试获取匿名Token...")
             anonymous_token = await self.get_anonymous_token(http_client)
@@ -314,23 +356,41 @@ class TokenPool:
     
     async def switch_to_next(self) -> str:
         """
-        切换到下一个配置Token（轮询）
-        使用异步锁确保并发安全，防止竞态条件
-        
+        切换到下一个可用的配置Token（轮询）
+        使用异步锁确保并发安全
+
         Returns:
-            str: 下一个Token
+            str: 下一个Token，如果所有Token都不可用则返回None
         """
-        async with self._switch_lock:  # 使用异步锁保护，确保原子操作
-            if len(self.tokens) <= 1:
-                info_log("[WARN] 只有一个token，无法切换")
-                return self.current_token if self.current_token else ""
-            
-            # 原子操作：切换到下一个token
-            self.current_index = (self.current_index + 1) % len(self.tokens)
-            self.current_token = self.tokens[self.current_index]
-            
-            info_log(f"[SWITCH] 切换到下一个token (索引: {self.current_index}/{len(self.tokens)}): {self.current_token[:20]}...")
-            return self.current_token
+        async with self._switch_lock:
+            # 如果在降级模式，尝试恢复配置 Token
+            if self._in_fallback:
+                self.try_recover_tokens()
+
+            # 从当前位置开始，查找下一个可用的 Token
+            attempts = 0
+            while attempts < len(self.tokens):
+                self.current_index = (self.current_index + 1) % len(self.tokens)
+                next_token = self.tokens[self.current_index]
+
+                # 检查是否可用
+                if next_token in self.token_statuses and self.token_statuses[next_token].is_available:
+                    self.current_token = next_token
+                    status = self.token_statuses[next_token]
+
+                    available_count = sum(1 for s in self.token_statuses.values() if s.is_available)
+                    info_log(
+                        f"[SWITCH] 切换Token (成功率: {status.success_rate:.1%}, "
+                        f"可用: {available_count}/{len(self.tokens)})"
+                    )
+                    return next_token
+
+                attempts += 1
+
+            # 所有 Token 都不可用，标记降级
+            self._in_fallback = True
+            info_log("[FALLBACK] 所有配置Token不可用，降级到匿名Token")
+            return None
     
     async def switch_to_anonymous(self, http_client=None) -> Optional[str]:
         """
@@ -353,20 +413,127 @@ class TokenPool:
         """检查是否处于匿名模式"""
         return self.anonymous_mode
     
+    def mark_token_success(self, token: str):
+        """
+        标记 Token 使用成功
+
+        Args:
+            token: 成功的 Token
+        """
+        if token in self.token_statuses:
+            with self._status_lock:
+                status = self.token_statuses[token]
+                status.total_requests += 1
+                status.successful_requests += 1
+                status.failure_count = 0
+                status.last_failure_time = 0.0  # 重置失败时间
+
+                # 如果之前被禁用，现在恢复
+                was_disabled = not status.is_available
+                if was_disabled:
+                    status.is_available = True
+
+                # 退出降级模式
+                was_in_fallback = self._in_fallback
+                if was_disabled and was_in_fallback:
+                    self._in_fallback = False
+
+            # 日志输出在锁外，避免阻塞
+            if was_disabled:
+                info_log(f"[RECOVER] Token恢复可用: {token[:20]}...")
+                if was_in_fallback:
+                    info_log("[RECOVERY] 配置Token已恢复，退出降级模式")
+            else:
+                debug_log(
+                    f"[TOKEN] 成功 (成功率: {status.success_rate:.1%}, "
+                    f"总请求: {status.total_requests})"
+                )
+
+    def mark_token_failure(self, token: str):
+        """
+        标记 Token 使用失败
+
+        Args:
+            token: 失败的 Token
+        """
+        if token in self.token_statuses:
+            with self._status_lock:
+                status = self.token_statuses[token]
+                status.total_requests += 1
+                status.failure_count += 1
+                status.last_failure_time = time.time()
+
+                # 失败次数达到阈值，禁用 Token
+                should_disable = status.failure_count >= self.failure_threshold
+                if should_disable:
+                    status.is_available = False
+
+                failure_count = status.failure_count
+                success_rate = status.success_rate
+
+            # 日志输出在锁外，避免阻塞
+            if should_disable:
+                error_log(
+                    f"[DISABLE] Token 已禁用: {token[:20]}... "
+                    f"(连续失败 {failure_count} 次)"
+                )
+            else:
+                info_log(
+                    f"[TOKEN] 失败 (失败计数: {failure_count}/{self.failure_threshold}, "
+                    f"成功率: {success_rate:.1%})"
+                )
+
+    def try_recover_tokens(self):
+        """
+        尝试恢复失败的 Token（在降级模式下定期调用）
+        恢复条件：失败时间超过 30 分钟
+
+        注意：这里只是标记为可用，实际验证在下次请求时进行
+        如果恢复的 Token 仍然失败，会再次被禁用
+        """
+        if not self._in_fallback:
+            return
+
+        current_time = time.time()
+        recovery_interval = 1800  # 30 分钟
+        recovered_tokens = []
+
+        with self._status_lock:
+            for status in self.token_statuses.values():
+                if (not status.is_available and
+                    current_time - status.last_failure_time > recovery_interval):
+                    status.is_available = True
+                    status.failure_count = 0
+                    recovered_tokens.append(status.token)
+
+            # 如果恢复了至少一个 Token，退出降级模式
+            if recovered_tokens:
+                self._in_fallback = False
+
+        # 日志输出在锁外，避免阻塞
+        if recovered_tokens:
+            for token in recovered_tokens:
+                info_log(f"[RECOVER] Token 已恢复: {token[:20]}...")
+            info_log(f"[RECOVERY] 恢复了 {len(recovered_tokens)} 个 Token，退出降级模式")
+
     def get_status(self) -> Dict[str, Any]:
         """
         获取Token池状态信息
-        
+
         Returns:
             Dict: 包含Token池状态的字典
         """
+        # 统计可用 Token
+        available_count = sum(1 for s in self.token_statuses.values() if s.is_available)
+
         status = {
             "configured_tokens": len(self.tokens),
+            "available_tokens": available_count,
             "current_index": self.current_index,
             "anonymous_mode": self.anonymous_mode,
             "guest_token_enabled": settings.ENABLE_GUEST_TOKEN,
         }
-        
+
         if self._anonymous_token:
             status["anonymous_token_cached"] = True
             if self._anonymous_token_expires_at:
@@ -374,7 +541,7 @@ class TokenPool:
                 status["cache_remaining_seconds"] = max(0, int(remaining))
         else:
             status["anonymous_token_cached"] = False
-        
+
         return status
     
     def is_anonymous_token(self, token: str) -> bool:
