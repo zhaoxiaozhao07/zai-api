@@ -440,6 +440,10 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         tools_count=len(request.tools) if request.tools else 0
     )
     
+    # 输出客户端请求体
+    request_body = request.model_dump()
+    debug_log("客户端请求体详情", request_body=json_lib.dumps(request_body))
+    
     # 获取复用的HTTP客户端
     request_client = None
     
