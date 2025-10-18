@@ -97,186 +97,74 @@ def extract_user_id_from_token(token: str) -> str:
 
 
 def generate_signature(
-    message_text: str, 
-    request_id: str, 
-    timestamp_ms: int, 
-    user_id: str, 
+    message_text: str,
+    request_id: str,
+    timestamp_ms: int,
+    user_id: str,
     secret: str = None
 ) -> str:
     """
     生成Z.AI API双层HMAC-SHA256签名
-    
-    ⚠️ 2025-10-17 更新：基于浏览器断点调试分析的最新算法
-    
-    算法流程（从DARET26p.js逆向分析）：
-    1. 使用TextEncoder编码消息为UTF-8字节
-    2. 使用btoa进行Base64编码：btoa(String.fromCharCode(...bytes))
-    3. 构建第一部分：a = "requestId,<id>,timestamp,<ts>,user_id,<uid>"
-    4. 构建canonical string：g = a + "|" + base64(message) + "|" + timestamp
-    5. 计算时间窗口：S = Math.floor(timestamp / (5 * 60 * 1000))
-    6. 第一层HMAC：v = hmac_sha256(secret, S)  -> 返回hex字符串
-    7. 第二层HMAC：signature = hmac_sha256(v_hex_as_utf8, g)
-    
-    注意：第二层HMAC使用第一层的hex字符串（作为UTF-8字符串）作为密钥
-    
+
+    算法流程：
+    1. UTF-8编码消息 → Base64编码
+    2. 构建canonical string: "requestId,{id},timestamp,{ts},user_id,{uid}|{base64}|{ts}"
+    3. 计算时间窗口: window = timestamp // (5 * 60 * 1000)
+    4. 第一层HMAC: hmac_sha256(secret, window) → hex字符串
+    5. 第二层HMAC: hmac_sha256(hex_as_utf8, canonical) → signature
+
     Args:
         message_text: 最近一次user content
         request_id: 请求ID
         timestamp_ms: 时间戳（毫秒）
         user_id: 用户ID
-        secret: 签名密钥，默认从环境变量ZAI_SIGNING_SECRET读取
-        
+        secret: 签名密钥（hex格式），默认从环境变量ZAI_SIGNING_SECRET读取
+
     Returns:
-        签名字符串
+        签名字符串（hex格式）
     """
     import base64
-    
-    # 1. 处理消息文本
+
+    # 1. Base64编码消息
     message = message_text or ""
-    
-    # 2. Base64编码消息（模拟JavaScript的btoa）
     message_bytes = message.encode("utf-8")
     message_base64 = base64.b64encode(message_bytes).decode("utf-8")
-    
-    # 3. 构建第一部分
+
+    # 2. 构建canonical string
     a = f"requestId,{request_id},timestamp,{timestamp_ms},user_id,{user_id}"
-    
-    # 4. 构建canonical string
     canonical_string = f"{a}|{message_base64}|{timestamp_ms}"
-    
-    # 5. 时间窗口索引（5分钟为一个窗口）
+
+    # 3. 计算时间窗口（5分钟为一个窗口）
     window_index = timestamp_ms // (5 * 60 * 1000)
-    
-    # 6. 获取secret密钥
-    # ✅ 2025-10-18 密钥更新：
-    # 通过暴力搜索所有W0数组索引，成功找到当前有效的签名密钥！
-    # 新密钥索引: 635 (在W0数组中的实际位置: 635-222=413)
-    # 密钥长度: 31 bytes
-    # 密钥 (hex): 6b65792d40404040292929282928283929292d787878782626262525252525
-    # 验证状态: ✅ 已通过两组测试数据验证
-    #
-    # 历史记录：
-    # - 旧密钥（已失效）: c4de923f8fd2eb92 (索引 309)
-    # - 候选密钥（未验证）: 531:1f9eb337101b0ef3c20e08, 323:a87d52a8f0e91bc0b078
-    #
-    # 用户可通过环境变量 ZAI_SIGNING_SECRET 覆盖默认密钥
+
+    # 4. 获取密钥
     if secret is None:
         secret_env = os.getenv("ZAI_SIGNING_SECRET")
         if secret_env:
-            # 如果环境变量提供了hex格式的密钥，尝试解码
-            try:
-                # 支持任意长度的hex密钥
-                if all(c in '0123456789abcdefABCDEF' for c in secret_env):
-                    root_key = bytes.fromhex(secret_env)
-                else:
-                    root_key = secret_env.encode("utf-8")
-            except:
+            # 从环境变量读取
+            if all(c in '0123456789abcdefABCDEF' for c in secret_env):
+                root_key = bytes.fromhex(secret_env)
+            else:
                 root_key = secret_env.encode("utf-8")
         else:
-            # 使用最新验证的密钥（2025-10-18 通过暴力搜索找到）
-            # 索引: 635, 长度: 31 bytes
-            # 用户可通过环境变量 ZAI_SIGNING_SECRET 设置正确的密钥
+            # 使用默认密钥（2025-10-18 验证有效）
             root_key = bytes.fromhex("6b65792d40404040292929282928283929292d787878782626262525252525")
     else:
-        # 用户提供的密钥，尝试判断是hex还是字符串
+        # 用户提供的密钥
         if isinstance(secret, bytes):
             root_key = secret
         elif len(secret) % 2 == 0 and all(c in '0123456789abcdefABCDEF' for c in secret):
-            # 如果是偶数长度且全是hex字符，认为是hex格式
             root_key = bytes.fromhex(secret)
         else:
             root_key = secret.encode("utf-8")
-    
-    # 7. 第一层HMAC：生成派生密钥（返回hex字符串）
+
+    # 5. 第一层HMAC：生成派生密钥
     derived_hex = hmac.new(root_key, str(window_index).encode("utf-8"), hashlib.sha256).hexdigest()
-    
-    # 8. 第二层HMAC：使用hex字符串作为UTF-8密钥
-    # 注意：derived_hex是一个hex字符串，我们将其作为UTF-8字符串使用
+
+    # 6. 第二层HMAC：生成最终签名
     signature = hmac.new(derived_hex.encode("utf-8"), canonical_string.encode("utf-8"), hashlib.sha256).hexdigest()
-    
+
     return signature
-
-
-def zs(e: str, t: str, timestamp: int, secret: str = None) -> Dict[str, str]:
-    """
-    生成Z.AI API签名（兼容旧版接口）
-    
-    ⚠️ 2025-10-17 更新：基于浏览器断点调试分析
-    
-    Args:
-        e: 签名字符串，格式为 "requestId,{requestId},timestamp,{timestamp},user_id,{user_id}"
-        t: 最近一次user content
-        timestamp: 时间戳（毫秒）
-        secret: 签名密钥，默认从环境变量读取
-        
-    Returns:
-        包含签名和时间戳的字典
-    """
-    import base64
-    
-    # 1. 处理消息文本
-    message = t or ""
-    
-    # 2. Base64编码消息
-    message_bytes = message.encode("utf-8")
-    message_base64 = base64.b64encode(message_bytes).decode("utf-8")
-    
-    # 3. 构建canonical string
-    canonical_string = f"{e}|{message_base64}|{timestamp}"
-    
-    # 4. 时间窗口索引
-    window_index = timestamp // (5 * 60 * 1000)
-    
-    # 5. 获取secret密钥
-    # ✅ 2025-10-18 密钥更新：
-    # 通过暴力搜索所有W0数组索引，成功找到当前有效的签名密钥！
-    # 新密钥索引: 635 (在W0数组中的实际位置: 635-222=413)
-    # 密钥长度: 31 bytes
-    # 密钥 (hex): 6b65792d40404040292929282928283929292d787878782626262525252525
-    # 验证状态: ✅ 已通过两组测试数据验证
-    #
-    # 历史记录：
-    # - 旧密钥（已失效）: c4de923f8fd2eb92 (索引 309)
-    # - 候选密钥（未验证）: 531:1f9eb337101b0ef3c20e08, 323:a87d52a8f0e91bc0b078
-    #
-    # 用户可通过环境变量 ZAI_SIGNING_SECRET 覆盖默认密钥
-    if secret is None:
-        secret_env = os.getenv("ZAI_SIGNING_SECRET")
-        if secret_env:
-            # 如果环境变量提供了hex格式的密钥，尝试解码
-            try:
-                # 支持任意长度的hex密钥
-                if all(c in '0123456789abcdefABCDEF' for c in secret_env):
-                    root_key = bytes.fromhex(secret_env)
-                else:
-                    root_key = secret_env.encode("utf-8")
-            except:
-                root_key = secret_env.encode("utf-8")
-        else:
-            # 使用最新验证的密钥（2025-10-18 通过暴力搜索找到）
-            # 索引: 635, 长度: 31 bytes
-            # 用户可通过环境变量 ZAI_SIGNING_SECRET 设置正确的密钥
-            root_key = bytes.fromhex("6b65792d40404040292929282928283929292d787878782626262525252525")
-    else:
-        # 用户提供的密钥，尝试判断是hex还是字符串
-        if isinstance(secret, bytes):
-            root_key = secret
-        elif len(secret) % 2 == 0 and all(c in '0123456789abcdefABCDEF' for c in secret):
-            # 如果是偶数长度且全是hex字符，认为是hex格式
-            root_key = bytes.fromhex(secret)
-        else:
-            root_key = secret.encode("utf-8")
-    
-    # 6. 双层HMAC签名
-    # Layer1: 派生密钥（返回hex字符串）
-    derived_hex = hmac.new(root_key, str(window_index).encode('utf-8'), hashlib.sha256).hexdigest()
-    # Layer2: 最终签名（使用hex字符串作为UTF-8密钥）
-    signature = hmac.new(derived_hex.encode('utf-8'), canonical_string.encode('utf-8'), hashlib.sha256).hexdigest()
-
-    return {
-        "signature": signature,
-        "timestamp": timestamp
-    }
 
 
 def generate_zs_signature(
@@ -305,8 +193,13 @@ def generate_zs_signature(
     # 构建签名字符串
     e = f"requestId,{request_id},timestamp,{timestamp},user_id,{user_id}"
     
-    # 调用zs函数生成签名
-    return zs(e, user_content or "", timestamp, secret)
+    # 调用generate_signature函数生成签名
+    signature = generate_signature(user_content, request_id, timestamp, user_id, secret)
+    
+    return {
+        "signature": signature,
+        "timestamp": timestamp
+    }
 
 
 class SignatureGenerator:
@@ -392,11 +285,13 @@ class SignatureGenerator:
         # 提取user_id
         user_id = self.extract_user_id(token)
         
-        # 构建签名字符串
-        e = f"requestId,{request_id},timestamp,{timestamp},user_id,{user_id}"
+        # 生成签名
+        signature = self.generate_signature(user_content, request_id, timestamp, user_id)
         
-        # 调用zs函数生成签名
-        return zs(e, user_content or "", timestamp, self.secret)
+        return {
+            "signature": signature,
+            "timestamp": timestamp
+        }
     
     def generate_with_user_id(
         self,
@@ -417,6 +312,9 @@ class SignatureGenerator:
         Returns:
             包含signature和timestamp的字典
         """
-        e = f"requestId,{request_id},timestamp,{timestamp},user_id,{user_id}"
-        return zs(e, user_content or "", timestamp, self.secret)
-
+        signature = self.generate_signature(user_content, request_id, timestamp, user_id)
+        
+        return {
+            "signature": signature,
+            "timestamp": timestamp
+        }
