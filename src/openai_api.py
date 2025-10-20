@@ -804,9 +804,16 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                                 }
                                                                 yield f"data: {json_lib.dumps(role_chunk)}\n\n"
 
+                                                            # 搜索信息包裹在<think>标签中（如果是第一次输出，添加<think>标签）
+                                                            if first_thinking_chunk:
+                                                                search_content = f"<think>\n\n{search_info}\n\n"
+                                                                first_thinking_chunk = False
+                                                            else:
+                                                                search_content = f"\n\n{search_info}\n\n"
+                                                            
                                                             search_chunk = {
                                                                 "choices": [{
-                                                                    "delta": {"content": f"\n\n{search_info}\n\n"},
+                                                                    "delta": {"content": search_content},
                                                                     "finish_reason": None,
                                                                     "index": 0,
                                                                     "logprobs": None,
@@ -869,6 +876,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                                                 else:
                                                     content = delta_content
 
+                                                # 如果是第一个thinking chunk且还没有输出<think>标签（可能搜索信息已经输出了）
                                                 if first_thinking_chunk:
                                                     formatted_content = f"<think>{content}"
                                                     first_thinking_chunk = False
@@ -1405,7 +1413,7 @@ async def handle_non_stream_request(
                     if phase == "tool_call":
                         edit_content = data.get("edit_content", "")
                         
-                        # 提取搜索查询信息并添加到最终内容
+                        # 提取搜索查询信息并添加到reasoning_content（思考内容）
                         if edit_content and "<glm_block" in edit_content and "search" in edit_content:
                             try:
                                 import re
@@ -1427,7 +1435,8 @@ async def handle_non_stream_request(
                                     queries = re.findall(r'"([^"]+)"', queries_str)
                                     if queries:
                                         search_info = "🔍 **搜索：** " + "　".join(queries[:5])
-                                        final_content += f"\n\n{search_info}\n\n"
+                                        # 搜索信息添加到reasoning_content（思考内容）而不是final_content
+                                        reasoning_content += f"\n\n{search_info}\n\n"
                                         debug_log(f"[非流式] 提取到搜索信息: {queries}")
                             except Exception as e:
                                 debug_log(f"[非流式] 提取搜索信息失败: {e}")

@@ -566,7 +566,7 @@ class ZAITransformer:
                 "preview_mode": is_search or is_advanced_search,
                 "flags": [],
                 "features": hidden_mcp_features,
-                "enable_thinking": is_thinking,
+                "enable_thinking": is_thinking or is_search or is_advanced_search,
             },
             "background_tasks": {
                 "title_generation": False,

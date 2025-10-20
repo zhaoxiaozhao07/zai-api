@@ -137,18 +137,19 @@ def generate_signature(
     # 3. 计算时间窗口（5分钟为一个窗口）
     window_index = timestamp_ms // (5 * 60 * 1000)
 
-    # 4. 获取密钥
+    # 4. 获取密钥（必须从环境变量读取）
     if secret is None:
         secret_env = os.getenv("ZAI_SIGNING_SECRET")
-        if secret_env:
-            # 从环境变量读取
-            if all(c in '0123456789abcdefABCDEF' for c in secret_env):
-                root_key = bytes.fromhex(secret_env)
-            else:
-                root_key = secret_env.encode("utf-8")
+        if not secret_env:
+            raise ValueError(
+                "签名密钥未配置！请在.env文件中设置 ZAI_SIGNING_SECRET 环境变量。\n"
+                "参考: env_template.txt 文件中的 ZAI_SIGNING_SECRET 配置项。"
+            )
+        # 从环境变量读取
+        if all(c in '0123456789abcdefABCDEF' for c in secret_env):
+            root_key = bytes.fromhex(secret_env)
         else:
-            # 使用默认密钥（2025-10-18 验证有效）
-            root_key = bytes.fromhex("6b65792d40404040292929282928283929292d787878782626262525252525")
+            root_key = secret_env.encode("utf-8")
     else:
         # 用户提供的密钥
         if isinstance(secret, bytes):
@@ -214,9 +215,19 @@ class SignatureGenerator:
         初始化签名生成器
         
         Args:
-            secret: 签名密钥，如果不提供则从环境变量ZAI_SIGNING_SECRET读取，默认为"junjie"
+            secret: 签名密钥，如果不提供则从环境变量ZAI_SIGNING_SECRET读取
+        
+        Raises:
+            ValueError: 当签名密钥未配置时抛出异常
         """
-        self.secret = secret or os.getenv("ZAI_SIGNING_SECRET", "junjie") or "junjie"
+        if secret is None:
+            secret = os.getenv("ZAI_SIGNING_SECRET")
+            if not secret:
+                raise ValueError(
+                    "签名密钥未配置！请在.env文件中设置 ZAI_SIGNING_SECRET 环境变量。\n"
+                    "参考: env_template.txt 文件中的 ZAI_SIGNING_SECRET 配置项。"
+                )
+        self.secret = secret
     
     def decode_jwt_payload(self, token: str) -> Dict[str, Any]:
         """
