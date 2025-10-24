@@ -14,7 +14,7 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from .helpers import error_log, info_log, debug_log
+from .helpers import error_log, info_log, debug_log, bind_request_context, reset_request_context
 from .config import settings
 
 
@@ -124,13 +124,16 @@ class TokenPool:
         # 1. 从环境变量ZAI_TOKEN加载（现在是可选的）
         zai_token = os.getenv("ZAI_TOKEN", "").strip()
         if not zai_token:
-            info_log("[INFO] 未配置ZAI_TOKEN，将启用匿名Token模式")
+            info_log("未配置 ZAI_TOKEN，启用匿名 Token 模式")
             self.anonymous_mode = True
         else:
             # 处理多个token（逗号分割）
             env_tokens = [token.strip() for token in zai_token.split(",") if token.strip()]
             token_set.update(env_tokens)
-            info_log(f"从环境变量ZAI_TOKEN加载了 {len(env_tokens)} 个token")
+            info_log(
+                "加载环境变量 Token",
+                tokens=len(env_tokens),
+            )
         
         # 2. 从tokens.txt加载（可选）
         tokens_file = Path("tokens.txt")
@@ -140,11 +143,14 @@ class TokenPool:
                     file_tokens = [line.strip() for line in f if line.strip()]
                     file_tokens_count = len(file_tokens)
                     token_set.update(file_tokens)
-                    info_log(f"从tokens.txt加载了 {file_tokens_count} 个token")
+                    info_log(
+                        "加载 tokens.txt",
+                        tokens=file_tokens_count,
+                    )
             except Exception as e:
                 error_log(f"[WARN] 读取tokens.txt失败: {e}")
         else:
-            info_log("tokens.txt文件不存在，跳过加载")
+            info_log("tokens.txt 文件不存在，跳过加载")
         
         # 去重后的token列表
         self.tokens = list(token_set)
@@ -152,14 +158,14 @@ class TokenPool:
         if self.tokens:
             # 有配置的token
             self.anonymous_mode = False
-            info_log(f"[OK] Token池初始化完成，共 {len(self.tokens)} 个唯一token")
+            info_log("Token 池初始化完成", total=len(self.tokens))
 
             # 初始化 Token 状态（会设置 current_token 和 current_index）
             self._init_token_statuses()
         else:
             # 没有配置token，启用匿名模式
             self.anonymous_mode = True
-            info_log("[INFO] Token池为空，启用纯匿名Token模式")
+            info_log("Token 池为空，启用匿名模式")
 
     def _init_token_statuses(self):
         """初始化 Token 状态"""
