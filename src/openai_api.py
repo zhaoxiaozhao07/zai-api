@@ -36,10 +36,10 @@ try:
             return orjson.loads(s)
     
     json_lib = JSONEncoder()
-    info_log("✅ 使用 orjson 进行 JSON 序列化/反序列化（性能优化）")
+    info_log("[OK] 使用 orjson 进行 JSON 序列化/反序列化（性能优化）")
 except ImportError:
     json_lib = json
-    info_log("⚠️ orjson 未安装，使用标准 json 库")
+    info_log("[WARN] orjson 未安装，使用标准 json 库")
 
 router = APIRouter()
 

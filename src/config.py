@@ -117,8 +117,11 @@ class Settings(BaseSettings):
     
     # Z.AI Token Configuration
     ZAI_TOKEN: str = os.getenv("ZAI_TOKEN", "")
-    ZAI_SIGNING_SECRET: str = os.getenv("ZAI_SIGNING_SECRET", "junjie")
-    ZAI_FE_VERSION: str = os.getenv("ZAI_FE_VERSION", "prod-fe-1.0.103")
+    ZAI_SIGNING_SECRET: str = os.getenv("ZAI_SIGNING_SECRET")
+    
+    # Z.AI FE Version - 自动获取（如果失败则使用环境变量）
+    _env_fe_version: Optional[str] = os.getenv("ZAI_FE_VERSION", "prod-fe-1.0.108")
+    ZAI_FE_VERSION: str = ""  # 稍后在模块级别初始化为自动获取的版本
     
     # Anonymous Token Configuration - 匿名Token配置
     ENABLE_GUEST_TOKEN: bool = os.getenv("ENABLE_GUEST_TOKEN", "true").lower() == "true"
@@ -179,6 +182,27 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# 初始化 FE_VERSION（自动获取，失败时使用环境变量）
+def _init_fe_version():
+    """初始化 FE_VERSION（自动获取，失败时使用环境变量）"""
+    try:
+        from .fe_version import get_fe_version_with_fallback
+        version = get_fe_version_with_fallback(fallback=settings._env_fe_version)
+        if version:
+            settings.ZAI_FE_VERSION = version
+            print(f"[INFO] FE_VERSION 已初始化: {version}")
+        else:
+            print("[WARNING] 无法获取 FE_VERSION，请在 .env 中设置 ZAI_FE_VERSION")
+    except Exception as e:
+        # 如果导入失败，使用环境变量
+        if settings._env_fe_version:
+            settings.ZAI_FE_VERSION = settings._env_fe_version
+            print(f"[INFO] FE_VERSION 使用环境变量: {settings._env_fe_version}")
+        else:
+            print(f"[ERROR] 无法初始化 FE_VERSION: {e}")
+
+_init_fe_version()
 
 # Model Mapping Configuration - ZAI API模型映射
 MODEL_MAPPING = {
