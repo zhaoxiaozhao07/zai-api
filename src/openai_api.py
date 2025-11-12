@@ -10,7 +10,15 @@ from typing import Optional
 
 from .config import settings
 from .schemas import OpenAIRequest, ModelsResponse, Model
-from .helpers import error_log, info_log, debug_log, get_logger, bind_request_context, reset_request_context
+from .helpers import (
+    error_log,
+    info_log,
+    debug_log,
+    get_logger,
+    bind_request_context,
+    reset_request_context,
+    request_stage_log,
+)
 from .services.openai_service import chat_completion_service
 
 # 尝试导入orjson（性能优化），如果不可用则fallback到标准json
@@ -66,12 +74,14 @@ async def list_models():
 async def chat_completions(request: OpenAIRequest, authorization: str = Header(...)):
     """Handle chat completion requests with ZAI transformer - 支持流式和非流式以及工具调用"""
     role = request.messages[0].role if request.messages else "unknown"
-    info_log(
+    request_stage_log(
+        "received",
         "收到客户端请求",
         model=request.model,
         stream=request.stream,
+        entry_role=role,
         message_count=len(request.messages),
-        tools_count=len(request.tools) if request.tools else 0
+        tools_count=len(request.tools) if request.tools else 0,
     )
     
     # 输出客户端请求体
@@ -90,14 +100,30 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         
         # 获取请求上下文（HTTP 客户端 / 代理 / 上游）
         request_client, current_proxy, current_upstream = await service.get_request_context()
+        request_stage_log(
+            "route_selected",
+            "已获取请求路由配置",
+            upstream=current_upstream,
+            proxy=current_proxy or "direct",
+        )
 
         # 准备请求并转换（Service 内部处理 Toolify 等逻辑）
         request_dict, request_dict_for_transform, enable_toolify = await service.prepare_request(request)
+        chat_id = request_dict_for_transform.get("chat_id")
         bind_request_context(
-            request_id=request_dict_for_transform.get("chat_id"),
+            request_id=chat_id,
             upstream=current_upstream,
             proxy=current_proxy,
             model=request.model,
+        )
+        request_stage_log(
+            "context_ready",
+            "请求上下文已建立",
+            request_id=chat_id,
+            upstream=current_upstream,
+            proxy=current_proxy or "direct",
+            toolify_enabled=enable_toolify,
+            mode="stream" if request.stream else "non_stream",
         )
 
         transformed = await service.build_transformed(
@@ -105,10 +131,20 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             client=request_client,
             upstream=current_upstream,
         )
+        request_stage_log(
+            "transformed",
+            "请求已转换为上游所需格式",
+            upstream=current_upstream,
+        )
 
         # 根据 stream 参数决定返回流式或非流式响应
         if not request.stream:
-            info_log("使用非流式模式")
+            request_stage_log(
+                "non_stream_mode",
+                "使用非流式模式",
+                upstream=current_upstream,
+                proxy=current_proxy or "direct",
+            )
             try:
                 result = await service.handle_non_stream_request(
                     request,
@@ -120,12 +156,20 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     request_dict_for_transform,
                     json_lib,
                 )
+                request_stage_log("non_stream_ready", "非流式结果已生成")
                 return result
             finally:
                 reset_request_context("request_id", "upstream", "proxy", "model")
 
         async def stream_response():
+            request_stage_log(
+                "stream_mode",
+                "使用流式模式",
+                upstream=current_upstream,
+                proxy=current_proxy or "direct",
+            )
             try:
+                request_stage_log("stream_dispatch", "开始推送流式响应数据")
                 async for chunk in service.stream_response(
                     request,
                     transformed,
@@ -137,10 +181,12 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     enable_toolify,
                 ):
                                                     yield chunk
+                request_stage_log("stream_finished", "流式响应生成器完成")
             finally:
+                request_stage_log("stream_cleanup", "流式上下文清理")
                 reset_request_context("request_id", "upstream", "proxy", "model")
 
-        return StreamingResponse(
+        streaming_response = StreamingResponse(
             stream_response(),
             media_type="text/event-stream",
             headers={
@@ -148,6 +194,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                 "Connection": "keep-alive",
             },
         )
+        request_stage_log("stream_ready", "流式响应已交给 FastAPI", media_type="text/event-stream")
+        return streaming_response
 
     except HTTPException:
         reset_request_context("request_id", "upstream", "proxy", "model")

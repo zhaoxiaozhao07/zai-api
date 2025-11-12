@@ -10,7 +10,14 @@ from typing import AsyncIterator, Dict, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 
-from ..helpers import info_log, debug_log, error_log, bind_request_context, reset_request_context
+from ..helpers import (
+    info_log,
+    debug_log,
+    error_log,
+    bind_request_context,
+    reset_request_context,
+    request_stage_log,
+)
 from ..schemas import OpenAIRequest
 from ..config import settings
 from ..toolify.detector import StreamingFunctionCallDetector
@@ -56,7 +63,7 @@ class ChatCompletionService:
         return request_dict, transformed_dict, enable_toolify
 
     async def build_transformed(self, request_dict: dict, client: httpx.AsyncClient, upstream: str) -> dict:
-        info_log("开始转换请求格式: OpenAI -> Z.AI", upstream=upstream)
+        request_stage_log("transform_in", "开始转换请求格式: OpenAI -> Z.AI", upstream=upstream)
         return await self.transformer.transform_request_in(
             request_dict,
             client=client,
@@ -93,6 +100,7 @@ class ChatCompletionService:
         json_lib,
     ) -> dict:
         bind_request_context(mode="non_stream")
+        request_stage_log("non_stream_pipeline", "进入非流式处理流程")
         final_content = ""
         reasoning_content = ""
         usage_info = {
@@ -119,6 +127,14 @@ class ChatCompletionService:
                 client = request_client
                 headers = transformed["config"]["headers"].copy()
 
+                attempt = retry_count + 1
+                request_stage_log(
+                    "upstream_request",
+                    "向上游发起非流式请求",
+                    attempt=attempt,
+                    upstream=current_upstream,
+                    proxy=current_proxy or "direct",
+                )
                 request_start_time = time.perf_counter()
                 async with client.stream(
                     "POST",
@@ -157,7 +173,12 @@ class ChatCompletionService:
                             detail=f"Upstream error: {error_msg[:500]}",
                         )
 
-                    info_log("Z.AI 响应成功，开始聚合非流式数据", status="success")
+                    request_stage_log(
+                        "upstream_response",
+                        "Z.AI 响应成功，开始聚合非流式数据",
+                        status="success",
+                        attempt=attempt,
+                    )
 
                     final_content = ""
                     reasoning_content = ""
@@ -231,6 +252,11 @@ class ChatCompletionService:
                         tool_response = parse_toolify_response(final_content, request.model)
                         if tool_response:
                             info_log("[TOOLIFY] 非流式响应中检测到工具调用")
+                            request_stage_log(
+                                "non_stream_toolify",
+                                "非流式响应中检测到工具调用",
+                                finish_reason="tool_calls",
+                            )
                             return {
                                 "id": transformed["body"]["chat_id"],
                                 "object": "chat.completion",
@@ -246,8 +272,9 @@ class ChatCompletionService:
                                 "usage": usage_info,
                             }
 
-                    info_log(
-                        "[REQUEST] 非流式响应完成",
+                    request_stage_log(
+                        "non_stream_completed",
+                        "非流式响应完成",
                         completion_tokens=usage_info.get("completion_tokens"),
                         prompt_tokens=usage_info.get("prompt_tokens"),
                     )
@@ -310,6 +337,7 @@ class ChatCompletionService:
         enable_toolify: bool,
     ) -> AsyncIterator[str]:
         bind_request_context(mode="stream")
+        request_stage_log("stream_pipeline", "进入流式处理流程")
         retry_count = 0
         last_error = None
         last_status_code = None
@@ -336,6 +364,14 @@ class ChatCompletionService:
                 client = request_client
                 headers = transformed["config"]["headers"].copy()
 
+                attempt = retry_count + 1
+                request_stage_log(
+                    "upstream_request",
+                    "向上游发起流式请求",
+                    attempt=attempt,
+                    upstream=current_upstream,
+                    proxy=current_proxy or "direct",
+                )
                 request_start_time = time.perf_counter()
                 async with client.stream(
                     "POST",
@@ -382,7 +418,12 @@ class ChatCompletionService:
                         yield "data: [DONE]\n\n"
                         return
 
-                    info_log("Z.AI 响应成功，开始处理 SSE 流", status="success")
+                    request_stage_log(
+                        "upstream_stream_ready",
+                        "Z.AI 响应成功，开始处理 SSE 流",
+                        status="success",
+                        attempt=attempt,
+                    )
 
                     has_thinking = False
                     thinking_opened = False  # 标记<think>标签是否已打开（全局只打开一次）
@@ -415,7 +456,10 @@ class ChatCompletionService:
                                         transformed["body"]["chat_id"],
                                     ):
                                         yield chunk
-                                    info_log("[REQUEST] 流式响应（早期工具调用检测）完成")
+                                    request_stage_log(
+                                        "stream_toolify_completed",
+                                        "流式响应（早期工具调用检测）完成",
+                                    )
                                     return
 
                             if chunk_str == "[DONE]":
@@ -476,7 +520,11 @@ class ChatCompletionService:
                                 yield finish_chunk
                                 yield "data: [DONE]\n\n"
                                 await self._mark_token_success(transformed)
-                                info_log("[REQUEST] 流式响应完成（带错误）")
+                                request_stage_log(
+                                    "stream_completed",
+                                    "流式响应完成（带错误）",
+                                    has_error=True,
+                                )
                                 return
                             continue
 
@@ -616,7 +664,11 @@ class ChatCompletionService:
                             yield "data: [DONE]\n\n"
                             
                             await self._mark_token_success(transformed)
-                            info_log("[REQUEST] 流式响应完成")
+                            request_stage_log(
+                                "stream_completed",
+                                "流式响应完成",
+                                has_error=False,
+                            )
                             return
 
                     # 流结束前，如果<think>标签还未关闭，则关闭它（兼容旧格式，没有 done 标志）
@@ -628,7 +680,11 @@ class ChatCompletionService:
                     yield "data: [DONE]\n\n"
 
                     await self._mark_token_success(transformed)
-                    info_log("[REQUEST] 流式响应完成")
+                    request_stage_log(
+                        "stream_completed",
+                        "流式响应完成",
+                        has_error=False,
+                    )
                     return
 
             except Exception as exc:

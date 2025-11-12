@@ -128,6 +128,19 @@ def debug_log(message: str, *args, **kwargs) -> None:
         _logger.debug(formatted_message, **kwargs)
 
 
+def request_stage_log(stage: str, message: str, **kwargs) -> None:
+    """
+    Log info-level request stage transitions without dumping payload data.
+
+    Args:
+        stage: Logical stage identifier (e.g. "received", "upstream_request").
+        message: Human readable description for terminal viewers.
+        **kwargs: Extra structured fields to enrich the log.
+    """
+    normalized_stage = (stage or "unknown").strip().lower().replace(" ", "_")
+    info_log(f"[REQUEST] {message}", stage=normalized_stage, **kwargs)
+
+
 def get_logger(name: str = None):
     """
     获取一个structlog logger实例
