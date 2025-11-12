@@ -51,8 +51,8 @@ htmlcov/
 test.*
 
 # Project specific
-tokens.txt
-proxys.txt
+tokens*.txt
+proxys*.txt
 .claude
 *.bak
 *.tmp

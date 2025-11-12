@@ -434,7 +434,51 @@ class ChatCompletionService:
                         data = chunk_data.get("data", {})
                         delta_content = data.get("delta_content")
                         edit_content = data.get("edit_content")
+                        edit_index = data.get("edit_index")
                         phase = data.get("phase")
+                        is_done = phase == "done" or data.get("done")
+                        error_info = data.get("error")
+
+                        # 详细调试：记录每个chunk的原始数据
+                        debug_log(f"[RAW_CHUNK] phase={phase}, delta={bool(delta_content)}, edit={bool(edit_content)}, edit_index={edit_index}, usage={bool(data.get('usage'))}, done={data.get('done')}, error={bool(error_info)}")
+                        if delta_content:
+                            debug_log(f"[RAW_DELTA] len={len(delta_content)}, content={delta_content[:100]}")
+                        if edit_content:
+                            edit_len = len(edit_content)
+                            edit_preview = edit_content[:200] if edit_len <= 500 else f"{edit_content[:100]}...{edit_content[-100:]}"
+                            debug_log(f"[RAW_EDIT] len={edit_len}, content={edit_preview}")
+                            # 对于包含 edit_content 的关键 chunk，记录完整 JSON
+                            if edit_len > 10 or is_done:
+                                debug_log(f"[RAW_JSON] {chunk_str[:1000]}")
+
+                        # 检测上游返回的错误（如内容安全警告）
+                        if error_info:
+                            error_detail = error_info.get("detail") or error_info.get("content") or "Unknown error"
+                            error_log(f"[UPSTREAM_ERROR] 上游返回错误: {error_detail}")
+                            
+                            # 关闭可能已打开的 think 标签
+                            if thinking_opened:
+                                yield self._build_content_chunk(json_lib, transformed, request, "</think>")
+                                thinking_opened = False
+                            
+                            # 如果还没有发送任何内容，发送错误信息
+                            if not has_thinking:
+                                has_thinking = True
+                                yield self._build_role_chunk(json_lib, transformed, request)
+                            
+                            # 发送错误提示给客户端
+                            error_message = f"\n\n[系统提示: {error_detail}]"
+                            yield self._build_content_chunk(json_lib, transformed, request, error_message)
+                            
+                            # 如果同时标记为 done，结束流
+                            if is_done:
+                                finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
+                                yield finish_chunk
+                                yield "data: [DONE]\n\n"
+                                await self._mark_token_success(transformed)
+                                info_log("[REQUEST] 流式响应完成（带错误）")
+                                return
+                            continue
 
                         # 调试日志：记录phase和是否有内容
                         if delta_content or edit_content:
@@ -459,6 +503,30 @@ class ChatCompletionService:
                                 # 输出清理后的thinking内容（如果清理后不为空）
                                 if cleaned_content:
                                     yield self._build_content_chunk(json_lib, transformed, request, cleaned_content)
+                            
+                            # 检查 edit_content 是否包含完整的 thinking + answer
+                            if edit_content and "</details>" in edit_content:
+                                debug_log("[THINKING_EDIT] 检测到 edit_content 包含 </details>，可能包含 answer")
+                                # 提取 </details> 后的内容作为 answer
+                                answer_content = edit_content.split("</details>")[-1].strip()
+                                if answer_content:
+                                    # 清理可能的 think 标签
+                                    answer_content = answer_content.replace("<think>", "").replace("</think>", "")
+                                    if answer_content:
+                                        # 关闭 think 标签
+                                        if thinking_opened:
+                                            yield self._build_content_chunk(json_lib, transformed, request, "</think>")
+                                            thinking_opened = False
+                                            debug_log("[THINK] 关闭</think>标签 (来自 edit_content)")
+                                        
+                                        # 输出 answer 内容
+                                        if not has_thinking:
+                                            has_thinking = True
+                                            yield self._build_role_chunk(json_lib, transformed, request)
+                                        
+                                        yield self._build_content_chunk(json_lib, transformed, request, answer_content)
+                                        debug_log(f"[THINKING_EDIT] 输出 answer 内容: {answer_content[:50]}...")
+                            
                             continue
 
                         # 清理非thinking阶段内容中可能自带的think标签（避免重复）
@@ -520,10 +588,38 @@ class ChatCompletionService:
 
                             yield self._build_content_chunk(json_lib, transformed, request, delta_content)
 
+                        # 处理 phase=other 时的 edit_content（可能包含最后一段答案）
+                        if phase == "other" and edit_content:
+                            # 清理可能的think标签
+                            cleaned_edit = edit_content.replace("<think>", "").replace("</think>", "")
+                            if cleaned_edit:
+                                if not has_thinking:
+                                    has_thinking = True
+                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                
+                                yield self._build_content_chunk(json_lib, transformed, request, cleaned_edit)
+                                debug_log(f"[OTHER] 输出 phase=other 的 edit_content: {cleaned_edit[:50]}...")
+
                         if data.get("usage"):
                             yield self._build_usage_chunk(json_lib, transformed, request, data["usage"])
 
-                    # 流结束前，如果<think>标签还未关闭，则关闭它
+                        # 处理完当前 chunk 的所有内容后，检查是否为 done 状态
+                        if is_done:
+                            debug_log("[DONE] 检测到 done 标志，流结束")
+                            # 流结束前，如果<think>标签还未关闭，则关闭它
+                            if thinking_opened:
+                                yield self._build_content_chunk(json_lib, transformed, request, "</think>")
+                                thinking_opened = False
+                            
+                            finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
+                            yield finish_chunk
+                            yield "data: [DONE]\n\n"
+                            
+                            await self._mark_token_success(transformed)
+                            info_log("[REQUEST] 流式响应完成")
+                            return
+
+                    # 流结束前，如果<think>标签还未关闭，则关闭它（兼容旧格式，没有 done 标志）
                     if thinking_opened:
                         yield self._build_content_chunk(json_lib, transformed, request, "</think>")
 

@@ -123,7 +123,7 @@ class Settings(BaseSettings):
     UPSTREAM_LIST: list[str] = Field(default_factory=_get_upstream_list)
 
     # 为了向后兼容,保留单地址配置(使用列表中的第一个)
-    API_ENDPOINT: str = Field(default_factory=lambda: (_get_upstream_list() or ["https://chat.z.ai/api/chat/completions"])[0])
+    API_ENDPOINT: str = Field(default_factory=lambda: (_get_upstream_list() or ["https://chat.z.ai/api/v2/chat/completions"])[0])
 
     # 上游地址策略: failover(失败切换) 或 round-robin(轮询)
     UPSTREAM_STRATEGY: str = os.getenv("UPSTREAM_STRATEGY", "round-robin").lower()

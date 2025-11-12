@@ -563,7 +563,7 @@ class ZAITransformer:
                 "image_generation": False,
                 "web_search": is_search or is_advanced_search,
                 "auto_web_search": is_search or is_advanced_search,
-                "preview_mode": is_search or is_advanced_search,
+                "preview_mode": True,
                 "flags": [],
                 "features": hidden_mcp_features,
                 "enable_thinking": is_thinking or is_search or is_advanced_search,
