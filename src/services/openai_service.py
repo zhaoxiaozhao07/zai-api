@@ -103,6 +103,7 @@ class ChatCompletionService:
         request_stage_log("non_stream_pipeline", "进入非流式处理流程")
         final_content = ""
         reasoning_content = ""
+        latest_full_thinking = ""
         usage_info = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -180,8 +181,16 @@ class ChatCompletionService:
                         attempt=attempt,
                     )
 
-                    final_content = ""
-                    reasoning_content = ""
+                    # 内容累积变量
+                    # 上游会先以多条 `phase=thinking` 的 data 推理，再在 `phase=answer` / `phase=other` 中给出
+                    # 完整的 edit_content（含 <details> 推理 + 最终回答）以及增量的 delta_content
+                    # 为了构造非流式一次性返回，我们：
+                    # 1）持续累积 thinking/answer 的 delta_content，用于兜底
+                    # 2）优先从带 </details> 的 edit_content 中解析出完整 reasoning_content + answer
+                    thinking_content = ""  # 累积 thinking 阶段的 delta_content（兜底）
+                    answer_content = ""    # 累积 answer 阶段的 delta_content（兜底）
+                    latest_full_edit = ""  # 记录最后一个包含 </details> 的 edit_content（完整思考+正文）
+                    latest_usage = None
 
                     async for line in response.aiter_lines():
                         if not line:
@@ -221,31 +230,74 @@ class ChatCompletionService:
                         delta_content = data.get("delta_content", "")
                         edit_content = data.get("edit_content", "")
 
+                        # 收集 usage 信息
                         if data.get("usage"):
-                            try:
-                                usage_info = data["usage"]
-                            except Exception:  # pragma: no cover
-                                pass
+                            latest_usage = data["usage"]
 
+                        # 跳过 tool_call 阶段
                         if phase == "tool_call":
-                            reasoning_content = self._extract_search_info(reasoning_content, edit_content)
                             continue
 
-                        if phase == "thinking" and delta_content:
-                            reasoning_content += self._clean_thinking(delta_content)
-                        elif phase == "answer":
-                            final_content += self._extract_answer(delta_content, edit_content)
+                        # thinking 阶段：累积 delta_content（只用于兜底，优先用 answer/other 阶段的完整 edit_content）
+                        if phase == "thinking":
+                            if delta_content:
+                                thinking_content += delta_content
+                            continue
 
-                    final_content = (final_content or "").strip()
-                    reasoning_content = (reasoning_content or "").strip()
+                        # answer 阶段：处理 edit_content（包含完整 thinking+正文）和 delta_content
+                        if phase == "answer":
+                            # 如果有 edit_content 且包含完整的 </details>，优先用它来解析完整推理+回答
+                            if edit_content and "</details>" in edit_content:
+                                latest_full_edit = edit_content
+                            
+                            # 累积 answer 的 delta_content
+                            if delta_content:
+                                answer_content += delta_content
+                            continue
 
-                    # 清理上游可能自带的think标签（避免重复）
-                    reasoning_content = reasoning_content.replace("<think>", "").replace("</think>", "")
-                    final_content = final_content.replace("<think>", "").replace("</think>", "")
+                        # other 阶段：可能有 usage 信息，也可能有最后的 edit_content 片段（例如句号）
+                        if phase == "other":
+                            # 收集 usage
+                            if data.get("usage"):
+                                latest_usage = data["usage"]
 
-                    if enable_toolify and final_content:
+                            # 将最后一小段正文（edit_content 或 delta_content）也并入 answer_content，保证非流式正文完整
+                            tail_text = None
+                            if edit_content:
+                                tail_text = edit_content
+                            elif delta_content:
+                                tail_text = delta_content
+
+                            if tail_text:
+                                answer_content += tail_text
+                            continue
+
+                    # 如果上游在 answer/other 阶段给出了完整的 edit_content（含 </details>），
+                    # 则优先用它来拆分出 reasoning_content 和 最终回答，避免仅依赖增量导致内容不完整或截断
+                    # 注意：latest_full_edit 中可能不包含 <details> 开头（例如只剩属性残片），
+                    # 这里统一交给 _split_edit_content + _clean_thinking 做清洗，移除 true" duration="1" 等残留。
+                    if latest_full_edit:
+                        thinking_part, answer_part = self._split_edit_content(latest_full_edit)
+                        if thinking_part:
+                            thinking_content = thinking_part
+                        if answer_part:
+                            answer_content = answer_part
+
+                    # 清理内容
+                    thinking_content = thinking_content.strip()
+                    answer_content = answer_content.strip()
+
+                    # 使用 usage 信息
+                    usage_info = latest_usage or {
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                    }
+
+                    # 检查 Toolify 工具调用
+                    if enable_toolify and answer_content:
                         debug_log("[TOOLIFY] 检查非流式响应中的工具调用")
-                        tool_response = parse_toolify_response(final_content, request.model)
+                        tool_response = parse_toolify_response(answer_content, request.model)
                         if tool_response:
                             info_log("[TOOLIFY] 非流式响应中检测到工具调用")
                             request_stage_log(
@@ -271,18 +323,19 @@ class ChatCompletionService:
                     request_stage_log(
                         "non_stream_completed",
                         "非流式响应完成",
+                        has_thinking=bool(thinking_content),
                         completion_tokens=usage_info.get("completion_tokens"),
                         prompt_tokens=usage_info.get("prompt_tokens"),
                     )
 
-                    # 构建消息对象，将 reasoning_content 作为单独的字段
+                    # 构建消息对象
                     message = {
                         "role": "assistant",
-                        "content": final_content,
+                        "content": answer_content,
                     }
-                    # 只有当存在 reasoning_content 时才添加该字段
-                    if reasoning_content:
-                        message["reasoning_content"] = reasoning_content
+                    # 如果有 thinking 内容，添加 reasoning_content 字段
+                    if thinking_content:
+                        message["reasoning_content"] = thinking_content
 
                     return {
                         "id": transformed["body"]["chat_id"],
@@ -428,6 +481,9 @@ class ChatCompletionService:
                     )
 
                     has_thinking = False
+                    # 累积已输出的 reasoning/content，用于做增量 diff，避免覆盖式 delta 导致截断
+                    thinking_accumulator = ""
+                    answer_accumulator = ""
 
                     async for line in response.aiter_lines():
                         if not line or not line.strip():
@@ -479,116 +535,91 @@ class ChatCompletionService:
                         data = chunk_data.get("data", {})
                         delta_content = data.get("delta_content")
                         edit_content = data.get("edit_content")
-                        edit_index = data.get("edit_index")
                         phase = data.get("phase")
                         is_done = phase == "done" or data.get("done")
                         error_info = data.get("error")
-
-                        # 详细调试：记录每个chunk的原始数据
-                        debug_log(f"[RAW_CHUNK] phase={phase}, delta={bool(delta_content)}, edit={bool(edit_content)}, edit_index={edit_index}, usage={bool(data.get('usage'))}, done={data.get('done')}, error={bool(error_info)}")
-                        if delta_content:
-                            debug_log(f"[RAW_DELTA] len={len(delta_content)}, content={delta_content[:100]}")
-                        if edit_content:
-                            edit_len = len(edit_content)
-                            edit_preview = edit_content[:200] if edit_len <= 500 else f"{edit_content[:100]}...{edit_content[-100:]}"
-                            debug_log(f"[RAW_EDIT] len={edit_len}, content={edit_preview}")
-                            # 对于包含 edit_content 的关键 chunk，记录完整 JSON
-                            if edit_len > 10 or is_done:
-                                debug_log(f"[RAW_JSON] {chunk_str[:1000]}")
 
                         # 检测上游返回的错误（如内容安全警告）
                         if error_info:
                             error_detail = error_info.get("detail") or error_info.get("content") or "Unknown error"
                             error_log(f"[UPSTREAM_ERROR] 上游返回错误: {error_detail}")
                             
-                            # 如果还没有发送任何内容，发送错误信息
                             if not has_thinking:
                                 has_thinking = True
                                 yield self._build_role_chunk(json_lib, transformed, request)
                             
-                            # 发送错误提示给客户端
                             error_message = f"\n\n[系统提示: {error_detail}]"
                             yield self._build_content_chunk(json_lib, transformed, request, error_message)
                             
-                            # 如果同时标记为 done，结束流
                             if is_done:
                                 finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
                                 yield finish_chunk
                                 yield "data: [DONE]\n\n"
                                 await self._mark_token_success(transformed)
-                                request_stage_log(
-                                    "stream_completed",
-                                    "流式响应完成（带错误）",
-                                    has_error=True,
-                                )
+                                request_stage_log("stream_completed", "流式响应完成（带错误）", has_error=True)
                                 return
                             continue
 
-                        # 调试日志：记录phase和是否有内容
-                        if delta_content or edit_content:
-                            debug_log(f"[PHASE] phase={phase}, has_delta={bool(delta_content)}, has_edit={bool(edit_content)}")
+                        # 跳过 tool_call 阶段
+                        if phase == "tool_call":
+                            continue
 
-                        # 处理thinking阶段：通过 reasoning_content 字段流式输出
+                        # thinking 阶段：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
                         if phase == "thinking":
                             if delta_content:
                                 if not has_thinking:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
-                                # 清理thinking内容中的HTML标记、引用符号和think标签
-                                cleaned_content = self._clean_thinking(delta_content)
-                                
-                                # 通过 reasoning_content 字段输出
-                                if cleaned_content:
-                                    yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned_content)
-                            
-                            # 检查 edit_content 是否包含完整的 thinking + answer
+                                # 先做“原样增量”：直接把本次 delta 里的新增部分先输出
+                                raw_new = self._diff_new_content(thinking_accumulator, delta_content)
+                                if raw_new:
+                                    cleaned_raw = self._clean_thinking(raw_new)
+                                    if cleaned_raw:
+                                        yield self._build_reasoning_chunk(
+                                            json_lib,
+                                            transformed,
+                                            request,
+                                            cleaned_raw,
+                                        )
+                                        thinking_accumulator += raw_new
+
+                                # 再做一次基于清洗后的兜底增量，防止上游覆盖式 delta 导致遗漏
+                                cleaned_full = self._clean_thinking(delta_content)
+                                if cleaned_full:
+                                    new_reasoning = self._diff_new_content(
+                                        self._clean_thinking(thinking_accumulator),
+                                        cleaned_full,
+                                    )
+                                    if new_reasoning:
+                                        yield self._build_reasoning_chunk(
+                                            json_lib,
+                                            transformed,
+                                            request,
+                                            new_reasoning,
+                                        )
+                                        # 这里不再修改 thinking_accumulator，避免与原始增量状态不一致
+                            continue
+
+                        # answer 阶段：处理 edit_content（包含完整thinking）和 delta_content
+                        if phase == "answer":
+                            # 如果有 edit_content 且包含完整 thinking，忽略（因为已在 thinking 阶段输出）
                             if edit_content and "</details>" in edit_content:
-                                debug_log("[THINKING_EDIT] 检测到 edit_content 包含 </details>，可能包含 answer")
-                                # 提取 </details> 后的内容作为 answer
-                                answer_content = edit_content.split("</details>")[-1].strip()
-                                if answer_content:
-                                    # 清理可能的 think 标签
-                                    answer_content = answer_content.replace("<think>", "").replace("</think>", "")
-                                    if answer_content:
-                                        # 输出 answer 内容
-                                        if not has_thinking:
-                                            has_thinking = True
-                                            yield self._build_role_chunk(json_lib, transformed, request)
-                                        
-                                        yield self._build_content_chunk(json_lib, transformed, request, answer_content)
-                                        debug_log(f"[THINKING_EDIT] 输出 answer 内容: {answer_content[:50]}...")
+                                # edit_content 包含完整的 thinking，但我们已经通过 delta 输出了
+                                pass
                             
+                            # 流式输出 answer 的 delta_content
+                            if delta_content:
+                                if not has_thinking:
+                                    has_thinking = True
+                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                
+                                yield self._build_content_chunk(json_lib, transformed, request, delta_content)
+                                answer_accumulator += delta_content
                             continue
 
-                        # 清理非thinking阶段内容中可能自带的think标签（避免重复）
-                        if delta_content:
-                            # 移除上游返回的<think>和</think>标签
-                            delta_content = delta_content.replace("<think>", "").replace("</think>", "")
-                            if not delta_content:  # 如果清理后为空，跳过
-                                continue
-
-                        # 跳过tool_call阶段的内容
-                        if phase == "tool_call":
-                            continue
-
-                        # 在answer阶段，处理edit_content（可能包含完整thinking + answer开头）
-                        if phase == "answer" and edit_content and not delta_content:
-                            # 这个chunk只有edit_content，可能包含完整thinking + answer开头
-                            # 提取</details>后的内容作为answer开头
-                            if "</details>" in edit_content:
-                                answer_start = edit_content.split("</details>")[-1].strip()
-                                if answer_start:
-                                    # 清理可能的think标签
-                                    answer_start = answer_start.replace("<think>", "").replace("</think>", "")
-                                    if answer_start:
-                                        delta_content = answer_start
-                                        debug_log(f"[EDIT_CONTENT] 从edit_content提取answer开头: {answer_start[:50]}...")
-                            # 如果没有</details>或提取失败，跳过这个chunk
-                            if not delta_content:
-                                continue
-
-                        if enable_toolify and toolify_detector:
+                        # Toolify 工具检测（如果启用）
+                        if enable_toolify and toolify_detector and delta_content:
                             yielded, should_continue, processed, has_thinking = self._process_toolify_detection(
                                 toolify_detector,
                                 delta_content,
@@ -601,48 +632,40 @@ class ChatCompletionService:
                                 yield chunk
                             if should_continue:
                                 continue
-                            # 清理处理后的内容中可能包含的think标签
-                            if processed:
-                                processed = processed.replace("<think>", "").replace("</think>", "")
                             delta_content = processed
 
-                        # 输出answer阶段的内容
-                        if delta_content and phase == "answer":
-                            if not has_thinking:
-                                has_thinking = True
-                                yield self._build_role_chunk(json_lib, transformed, request)
+                        # other 阶段：可能有 usage 信息，也可能携带正文的最后一小段（edit_content 或 delta_content）
+                        if phase == "other":
+                            # 1) 先处理 usage
+                            if data.get("usage"):
+                                yield self._build_usage_chunk(json_lib, transformed, request, data["usage"])
 
-                            yield self._build_content_chunk(json_lib, transformed, request, delta_content)
+                            # 2) 再处理正文增量
+                            tail_text = None
+                            # 上游有时会把最后一个标点放在 edit_content 里（例如："edit_content": "。"）
+                            if edit_content:
+                                tail_text = edit_content
+                            elif delta_content:
+                                tail_text = delta_content
 
-                        # 处理 phase=other 时的 edit_content（可能包含最后一段答案）
-                        if phase == "other" and edit_content:
-                            # 清理可能的think标签
-                            cleaned_edit = edit_content.replace("<think>", "").replace("</think>", "")
-                            if cleaned_edit:
+                            if tail_text:
                                 if not has_thinking:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
-                                
-                                yield self._build_content_chunk(json_lib, transformed, request, cleaned_edit)
-                                debug_log(f"[OTHER] 输出 phase=other 的 edit_content: {cleaned_edit[:50]}...")
+                                yield self._build_content_chunk(json_lib, transformed, request, tail_text)
+                            continue
 
+                        # 输出 usage 信息
                         if data.get("usage"):
                             yield self._build_usage_chunk(json_lib, transformed, request, data["usage"])
 
-                        # 处理完当前 chunk 的所有内容后，检查是否为 done 状态
+                        # 检查是否为 done 状态
                         if is_done:
-                            debug_log("[DONE] 检测到 done 标志，流结束")
-                            
                             finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
                             yield finish_chunk
                             yield "data: [DONE]\n\n"
-                            
                             await self._mark_token_success(transformed)
-                            request_stage_log(
-                                "stream_completed",
-                                "流式响应完成",
-                                has_error=False,
-                            )
+                            request_stage_log("stream_completed", "流式响应完成", has_error=False)
                             return
 
                     finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
@@ -889,6 +912,7 @@ class ChatCompletionService:
         })}\n\n"
 
     def _extract_search_info(self, reasoning_content: str, edit_content: str) -> str:
+        """从 edit_content 中提取搜索信息"""
         if edit_content and "<glm_block" in edit_content and "search" in edit_content:
             try:
                 import re
@@ -909,45 +933,122 @@ class ChatCompletionService:
                     if queries:
                         search_info = "🔍 **搜索：** " + "　".join(queries[:5])
                         reasoning_content += f"\n\n{search_info}\n\n"
-                        debug_log("[非流式] 提取到搜索信息", queries=queries)
+                        debug_log("[搜索信息] 提取到搜索查询", queries=queries)
             except Exception as exc:
-                debug_log("[非流式] 提取搜索信息失败", error=str(exc))
+                debug_log("[搜索信息] 提取失败", error=str(exc))
         return reasoning_content
 
     def _clean_thinking(self, delta_content: str) -> str:
+        """清理 thinking 内容，提取纯文本
+        
+        处理格式：
+        - 移除 <details> 和 <summary> 标签
+        - 移除 markdown 引用符号 "> "
+        - 保留纯文本内容
+        """
         import re
         
-        # 清理details标签的开头
-        if delta_content.startswith("<details"):
-            if "</summary>" in delta_content:
-                # 提取</summary>后的内容
-                delta_content = delta_content.split("</summary>")[-1].strip()
+        if not delta_content:
+            return ""
         
-        # 移除可能出现的summary标签
+        # 0. 先丢弃可能出现在 <details> 之前的属性残片，如：true" duration="2" view="" last_tool_call_name="">
+        #   这类内容通常出现在 edit_content 开头，但并不是思考正文的一部分
+        #   策略：如果首行包含 duration= 或 last_tool_call_name 等字段，且以 "> 或 "> 结尾，则视为属性串，丢弃整行
+        first_newline = delta_content.find("\n")
+        if first_newline != -1:
+            first_line = delta_content[:first_newline].strip()
+            # 如果这一行包含典型的 <details> 属性字段，且以 > 或 "> 结尾，判定为属性残片
+            if re.search(r'(duration=|last_tool_call_name|view=)', first_line) and re.search(r'[">]$', first_line):
+                delta_content = delta_content[first_newline + 1 :]
+
+        # 1. 移除 <details> 开始标签（包括所有属性）
+        delta_content = re.sub(r'<details[^>]*>', '', delta_content)
+        
+        # 2. 移除 </details> 结束标签
+        delta_content = re.sub(r'</details>', '', delta_content)
+        
+        # 3. 移除 <summary> 标签及其内容（如 "Thinking..." 或 "Thought for X seconds"）
         delta_content = re.sub(r'<summary[^>]*>.*?</summary>', '', delta_content, flags=re.DOTALL)
         
-        # 移除details标签
-        delta_content = re.sub(r'</?details[^>]*>', '', delta_content)
-        
-        # 移除引用标记 "> " (markdown引用格式)
+        # 4. 移除行首的引用标记 "> "（markdown 格式）
         delta_content = re.sub(r'^>\s*', '', delta_content, flags=re.MULTILINE)
         delta_content = re.sub(r'\n>\s*', '\n', delta_content)
         
-        # 移除多余的换行符
+        # 5. 移除多余的空行（3个及以上连续换行符）
         delta_content = re.sub(r'\n{3,}', '\n\n', delta_content)
         
+        # 6. 去除首尾空白
         return delta_content.strip()
 
-    def _extract_answer(self, delta_content: str, edit_content: str) -> str:
-        result = ""
-        if edit_content and "</details>\n" in edit_content:
-            content_after = edit_content.split("</details>\n")[-1]
-            if content_after:
-                result = content_after
-        else:
-            result = delta_content or ""
+    def _split_edit_content(self, edit_content: str) -> Tuple[str, str]:
+        """拆分 edit_content，返回 (thinking_part, answer_part)
         
-        return result
+        处理格式：
+        <details type="reasoning" done="false/true" ...>
+        <summary>Thinking...</summary>
+        > 思考内容
+        </details>
+        回答内容
+        """
+        if not edit_content:
+            return "", ""
+
+        thinking_part = ""
+        answer_part = ""
+
+        # 查找 </details> 标签位置
+        if "</details>" in edit_content:
+            # 分割 thinking 和 answer 部分
+            parts = edit_content.split("</details>", 1)
+            thinking_part = parts[0] + "</details>"  # 保留完整的 details 标签用于清理
+            answer_part = parts[1] if len(parts) > 1 else ""
+        else:
+            # 没有 details 标签，整个内容当作答案
+            answer_part = edit_content
+
+        # 清理 thinking 内容（移除标签，保留纯文本）
+        if thinking_part:
+            thinking_part = self._clean_thinking(thinking_part)
+        
+        # 清理 answer 内容（移除可能的标签）
+        answer_part = answer_part.strip()
+        if answer_part:
+            # 移除开头的换行符
+            answer_part = answer_part.lstrip('\n')
+            # 移除可能包含的 think 标签
+            answer_part = answer_part.replace("<think>", "").replace("</think>", "")
+        
+        return thinking_part, answer_part
+
+    def _diff_new_content(self, existing: str, incoming: str) -> str:
+        """计算 incoming 相比 existing 的新增部分（用于流式增量输出）"""
+        incoming = incoming or ""
+        if not incoming:
+            return ""
+
+        existing = existing or ""
+        if not existing:
+            return incoming
+
+        if incoming == existing:
+            return ""
+
+        # 如果 incoming 是 existing 的扩展，返回新增部分
+        if incoming.startswith(existing):
+            return incoming[len(existing):]
+
+        # 寻找最长公共前缀以计算增量
+        max_overlap = min(len(existing), len(incoming))
+        for overlap in range(max_overlap, 0, -1):
+            if existing[-overlap:] == incoming[:overlap]:
+                return incoming[overlap:]
+
+        # 如果 existing 完全包含在 incoming 中
+        if existing in incoming:
+            return incoming.replace(existing, "", 1)
+
+        # 无法确定增量，返回完整内容
+        return incoming
 
 
 chat_completion_service = ChatCompletionService()
