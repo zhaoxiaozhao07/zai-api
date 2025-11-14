@@ -243,10 +243,6 @@ class ChatCompletionService:
                     reasoning_content = reasoning_content.replace("<think>", "").replace("</think>", "")
                     final_content = final_content.replace("<think>", "").replace("</think>", "")
 
-                    # 如果有thinking内容，添加<think>标签并合并到final_content
-                    if reasoning_content:
-                        final_content = f"<think>{reasoning_content}</think>{final_content}"
-
                     if enable_toolify and final_content:
                         debug_log("[TOOLIFY] 检查非流式响应中的工具调用")
                         tool_response = parse_toolify_response(final_content, request.model)
@@ -279,6 +275,15 @@ class ChatCompletionService:
                         prompt_tokens=usage_info.get("prompt_tokens"),
                     )
 
+                    # 构建消息对象，将 reasoning_content 作为单独的字段
+                    message = {
+                        "role": "assistant",
+                        "content": final_content,
+                    }
+                    # 只有当存在 reasoning_content 时才添加该字段
+                    if reasoning_content:
+                        message["reasoning_content"] = reasoning_content
+
                     return {
                         "id": transformed["body"]["chat_id"],
                         "object": "chat.completion",
@@ -287,10 +292,7 @@ class ChatCompletionService:
                         "choices": [
                             {
                                 "index": 0,
-                                "message": {
-                                    "role": "assistant",
-                                    "content": final_content,
-                                },
+                                "message": message,
                                 "finish_reason": "stop",
                             }
                         ],
@@ -426,7 +428,6 @@ class ChatCompletionService:
                     )
 
                     has_thinking = False
-                    thinking_opened = False  # 标记<think>标签是否已打开（全局只打开一次）
 
                     async for line in response.aiter_lines():
                         if not line or not line.strip():
@@ -500,11 +501,6 @@ class ChatCompletionService:
                             error_detail = error_info.get("detail") or error_info.get("content") or "Unknown error"
                             error_log(f"[UPSTREAM_ERROR] 上游返回错误: {error_detail}")
                             
-                            # 关闭可能已打开的 think 标签
-                            if thinking_opened:
-                                yield self._build_content_chunk(json_lib, transformed, request, "</think>")
-                                thinking_opened = False
-                            
                             # 如果还没有发送任何内容，发送错误信息
                             if not has_thinking:
                                 has_thinking = True
@@ -530,27 +526,21 @@ class ChatCompletionService:
 
                         # 调试日志：记录phase和是否有内容
                         if delta_content or edit_content:
-                            debug_log(f"[PHASE] phase={phase}, has_delta={bool(delta_content)}, has_edit={bool(edit_content)}, thinking_opened={thinking_opened}")
+                            debug_log(f"[PHASE] phase={phase}, has_delta={bool(delta_content)}, has_edit={bool(edit_content)}")
 
-                        # 处理thinking阶段：用<think>标签包裹所有非answer阶段的内容
+                        # 处理thinking阶段：通过 reasoning_content 字段流式输出
                         if phase == "thinking":
                             if delta_content:
                                 if not has_thinking:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
-                                # 第一次遇到thinking内容，打开<think>标签（全局只打开一次）
-                                if not thinking_opened:
-                                    thinking_opened = True
-                                    yield self._build_content_chunk(json_lib, transformed, request, "<think>")
-                                    debug_log("[THINK] 打开<think>标签")
-                                
                                 # 清理thinking内容中的HTML标记、引用符号和think标签
                                 cleaned_content = self._clean_thinking(delta_content)
                                 
-                                # 输出清理后的thinking内容（如果清理后不为空）
+                                # 通过 reasoning_content 字段输出
                                 if cleaned_content:
-                                    yield self._build_content_chunk(json_lib, transformed, request, cleaned_content)
+                                    yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned_content)
                             
                             # 检查 edit_content 是否包含完整的 thinking + answer
                             if edit_content and "</details>" in edit_content:
@@ -561,12 +551,6 @@ class ChatCompletionService:
                                     # 清理可能的 think 标签
                                     answer_content = answer_content.replace("<think>", "").replace("</think>", "")
                                     if answer_content:
-                                        # 关闭 think 标签
-                                        if thinking_opened:
-                                            yield self._build_content_chunk(json_lib, transformed, request, "</think>")
-                                            thinking_opened = False
-                                            debug_log("[THINK] 关闭</think>标签 (来自 edit_content)")
-                                        
                                         # 输出 answer 内容
                                         if not has_thinking:
                                             has_thinking = True
@@ -584,7 +568,7 @@ class ChatCompletionService:
                             if not delta_content:  # 如果清理后为空，跳过
                                 continue
 
-                        # 跳过tool_call阶段的内容，但不关闭<think>标签
+                        # 跳过tool_call阶段的内容
                         if phase == "tool_call":
                             continue
 
@@ -603,12 +587,6 @@ class ChatCompletionService:
                             # 如果没有</details>或提取失败，跳过这个chunk
                             if not delta_content:
                                 continue
-
-                        # 进入answer阶段且有内容时，如果<think>标签已打开，则关闭它
-                        if phase == "answer" and thinking_opened and delta_content:
-                            yield self._build_content_chunk(json_lib, transformed, request, "</think>")
-                            thinking_opened = False
-                            debug_log("[THINK] 关闭</think>标签")
 
                         if enable_toolify and toolify_detector:
                             yielded, should_continue, processed, has_thinking = self._process_toolify_detection(
@@ -654,10 +632,6 @@ class ChatCompletionService:
                         # 处理完当前 chunk 的所有内容后，检查是否为 done 状态
                         if is_done:
                             debug_log("[DONE] 检测到 done 标志，流结束")
-                            # 流结束前，如果<think>标签还未关闭，则关闭它
-                            if thinking_opened:
-                                yield self._build_content_chunk(json_lib, transformed, request, "</think>")
-                                thinking_opened = False
                             
                             finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
                             yield finish_chunk
@@ -670,10 +644,6 @@ class ChatCompletionService:
                                 has_error=False,
                             )
                             return
-
-                    # 流结束前，如果<think>标签还未关闭，则关闭它（兼容旧格式，没有 done 标志）
-                    if thinking_opened:
-                        yield self._build_content_chunk(json_lib, transformed, request, "</think>")
 
                     finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
                     yield finish_chunk
@@ -865,6 +835,28 @@ class ChatCompletionService:
             'system_fingerprint': 'fp_zai_001',
         })}\n\n"
 
+    def _build_reasoning_chunk(
+        self,
+        json_lib,
+        transformed: dict,
+        request: OpenAIRequest,
+        reasoning_content: str,
+    ) -> str:
+        """构建包含 reasoning_content 的流式响应块"""
+        return f"data: {json_lib.dumps({
+            'choices': [{
+                'delta': {'reasoning_content': reasoning_content},
+                'finish_reason': None,
+                'index': 0,
+                'logprobs': None,
+            }],
+            'created': int(time.time()),
+            'id': transformed['body']['chat_id'],
+            'model': request.model,
+            'object': 'chat.completion.chunk',
+            'system_fingerprint': 'fp_zai_001',
+        })}\n\n"
+
     def _build_usage_chunk(self, json_lib, transformed: dict, request: OpenAIRequest, usage) -> str:
         return f"data: {json_lib.dumps({
             'choices': [{
@@ -941,9 +933,6 @@ class ChatCompletionService:
         delta_content = re.sub(r'^>\s*', '', delta_content, flags=re.MULTILINE)
         delta_content = re.sub(r'\n>\s*', '\n', delta_content)
         
-        # 清理上游可能自带的think标签
-        delta_content = delta_content.replace("<think>", "").replace("</think>", "")
-        
         # 移除多余的换行符
         delta_content = re.sub(r'\n{3,}', '\n\n', delta_content)
         
@@ -957,9 +946,6 @@ class ChatCompletionService:
                 result = content_after
         else:
             result = delta_content or ""
-        
-        # 清理上游可能自带的think标签
-        result = result.replace("<think>", "").replace("</think>", "")
         
         return result
 
