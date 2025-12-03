@@ -192,6 +192,7 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         格式化后的文件对象
     """
+    import uuid
     return {
         "type": "image",
         "file": file_data,
@@ -201,8 +202,9 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
         "status": "uploaded",
         "size": file_data.get("meta", {}).get("size", 0),
         "error": "",
-        "itemId": file_data["id"],
+        "itemId": str(uuid.uuid4()),  # 使用独立的UUID
         "media": "image"
+        # ref_user_msg_id 将在 zai_transformer.py 中添加
     }
 
 

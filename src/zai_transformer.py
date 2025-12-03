@@ -531,6 +531,9 @@ class ZAITransformer:
             info_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
         
         # GLM-4.5V特殊处理：修改messages中的图片URL格式
+        # 生成当前用户消息ID（用于关联files）
+        current_user_message_id = generate_uuid() if is_vision_model else None
+        
         if is_vision_model and uploaded_files_map:
             info_log(f"[GLM-4.5V] 开始修改消息中的图片URL格式")
             for msg in messages:
@@ -543,13 +546,15 @@ class ZAITransformer:
                                 # 提取file信息
                                 file_data = file_info.get("file", {})
                                 file_id = file_data.get("id", "")
-                                filename = file_data.get("filename", "image.png")
-                                # 构造GLM-4.5V格式的URL: {file_id}_{filename}
-                                new_url = f"{file_id}_{filename}"
-                                part["image_url"]["url"] = new_url
+                                # GLM-4.5V格式的URL只需要file_id
+                                part["image_url"]["url"] = file_id
                                 debug_log(f"[GLM-4.5V] 图片URL已转换", 
                                          original=original_url[:50], 
-                                         new=new_url)
+                                         new=file_id)
+                                
+                                # 添加ref_user_msg_id到文件信息（用于files数组）
+                                file_info["ref_user_msg_id"] = current_user_message_id
+                                files_list.append(file_info)
             
         # 构建上游请求体
         chat_id = generate_uuid()
@@ -588,12 +593,15 @@ class ZAITransformer:
             "id": generate_uuid(),
         }
         
-        # 如果有上传的文件，添加到body中（GLM-4.5V除外，它的图片已在messages中）
-        if files_list and not is_vision_model:
+        # 如果有上传的文件，添加到body中
+        if files_list:
             body["files"] = files_list
             debug_log(f"添加 {len(files_list)} 个文件到请求body")
-        elif is_vision_model and uploaded_files_map:
-            debug_log(f"[GLM-4.5V] 图片已保留在messages中，不添加files字段")
+        
+        # GLM-4.5V需要添加current_user_message_id字段
+        if is_vision_model and current_user_message_id:
+            body["current_user_message_id"] = current_user_message_id
+            debug_log(f"[GLM-4.5V] 添加current_user_message_id: {current_user_message_id}")
 
         # 生成时间戳和请求ID
         timestamp = int(time.time() * 1000)
