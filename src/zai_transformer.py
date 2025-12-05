@@ -505,7 +505,7 @@ class ZAITransformer:
             {"type": "mcp", "server": "image-search", "status": "hidden"},
             {"type": "mcp", "server": "deep-research", "status": "hidden"}
         ]
-        
+
         # 处理图像上传
         files_list = []
         uploaded_files_map = {}  # 用于GLM-4.5V：原始URL -> 文件信息的映射
@@ -559,12 +559,23 @@ class ZAITransformer:
         # 构建上游请求体
         chat_id = generate_uuid()
 
-        body = {
-            "stream": True,
-            "model": upstream_model_id,
-            "messages": messages,
-            "params": {},
-            "features": {
+        # GLM-4.5V 对 features/background_tasks 的要求与常规模型略有不同，
+        # 尽量对齐实际抓包格式，避免上游返回 "Oops" 错误。
+        if is_vision_model:
+            features = {
+                "image_generation": False,
+                "web_search": False,
+                "auto_web_search": False,
+                "preview_mode": True,
+                "flags": [],
+                "enable_thinking": True,
+            }
+            background_tasks = {
+                "title_generation": True,
+                "tags_generation": True,
+            }
+        else:
+            features = {
                 "image_generation": False,
                 "web_search": is_search or is_advanced_search,
                 "auto_web_search": is_search or is_advanced_search,
@@ -572,11 +583,19 @@ class ZAITransformer:
                 "flags": [],
                 "features": hidden_mcp_features,
                 "enable_thinking": is_thinking or is_search or is_advanced_search,
-            },
-            "background_tasks": {
+            }
+            background_tasks = {
                 "title_generation": False,
                 "tags_generation": False,
-            },
+            }
+
+        body = {
+            "stream": True,
+            "model": upstream_model_id,
+            "messages": messages,
+            "params": {},
+            "features": features,
+            "background_tasks": background_tasks,
             "mcp_servers": mcp_servers,
             "variables": {
                 "{{USER_NAME}}": "Guest",
@@ -584,14 +603,20 @@ class ZAITransformer:
                 # 使用优化后的时间变量生成函数（一次调用，避免重复）
                 **generate_time_variables("Asia/Shanghai"),
             },
-            "model_item": {
-                "id": upstream_model_id,
-                "name": requested_model,
-                "owned_by": "openai"
-            },
             "chat_id": chat_id,
             "id": generate_uuid(),
         }
+
+        # 与抓包保持一致：GLM-4.5V 需要 current_user_message_id/parent_id，且不上送 model_item
+        if is_vision_model:
+            body["current_user_message_id"] = current_user_message_id
+            body["current_user_message_parent_id"] = None
+        else:
+            body["model_item"] = {
+                "id": upstream_model_id,
+                "name": requested_model,
+                "owned_by": "openai"
+            }
         
         # 如果有上传的文件，添加到body中
         if files_list:
