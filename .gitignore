@@ -59,3 +59,5 @@ proxys*.txt
 .cursor/
 密钥分析.md
 debug/
+
+*.json

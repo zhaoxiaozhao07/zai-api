@@ -492,6 +492,10 @@ class ZAITransformer:
 
         # 构建MCP服务器列表
         mcp_servers = []
+        # GLM-4.6V 添加 VLM 专有服务器（支持图片搜索、识别、处理）
+        if requested_model == settings.GLM_46V_MODEL:
+            mcp_servers.extend(["vlm-image-search", "vlm-image-recognition", "vlm-image-processing"])
+            debug_log(f"🔍 检测到 GLM-4.6V 模型，添加 VLM MCP 服务器")
         if is_advanced_search:
             mcp_servers.append("advanced-search")
             debug_log(f"🔍 检测到高级搜索模型，添加 advanced-search MCP 服务器")
