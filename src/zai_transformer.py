@@ -276,7 +276,7 @@ class ZAITransformer:
         获取Z.AI认证令牌（从token池获取）
 
         Args:
-            http_client: 外部传入的HTTP客户端（用于匿名Token获取）
+            http_client: 外部传入的HTTP客户端（保留参数兼容性）
 
         Returns:
             str: 可用的Token
@@ -291,43 +291,23 @@ class ZAITransformer:
     async def switch_token(self, http_client=None) -> str:
         """
         切换到下一个token（请求失败时调用）
-        自动处理降级到匿名Token的逻辑
 
         Args:
-            http_client: 外部传入的HTTP客户端（如果切换到匿名Token时使用）
+            http_client: 外部传入的HTTP客户端（保留参数兼容性）
 
         Returns:
             str: 下一个Token
 
         Raises:
-            ValueError: 配置Token和匿名Token都不可用时抛出
+            ValueError: 所有配置Token都不可用时抛出
         """
         token_pool = await get_token_pool()
         token = await token_pool.switch_to_next()
 
-        # 如果返回 None，说明所有配置 Token 都不可用，降级到匿名 Token
         if token is None:
-            if settings.ENABLE_GUEST_TOKEN:
-                info_log("[FALLBACK] 配置Token全部失败，降级到匿名Token")
-                await self.clear_anonymous_token_cache()  # 清理缓存，获取新的匿名 Token
-                anonymous_token = await token_pool.get_anonymous_token(http_client)
-                if anonymous_token:
-                    return anonymous_token
-                else:
-                    raise ValueError("[ERROR] 配置Token和匿名Token都不可用")
-            else:
-                raise ValueError("[ERROR] 所有配置Token不可用且匿名Token已禁用")
+            raise ValueError("[ERROR] 所有配置Token都不可用")
 
         return token
-    
-    async def clear_anonymous_token_cache(self):
-        """
-        清理匿名Token缓存（当Token失效时调用）
-        线程安全版本
-        """
-        token_pool = await get_token_pool()
-        await token_pool.clear_anonymous_token_cache()  # 调用异步版本
-        debug_log("[TRANSFORMER] 匿名Token缓存已清理")
     
     async def refresh_header_template(self):
         """刷新header模板（清除缓存并重新生成）"""
@@ -456,19 +436,10 @@ class ZAITransformer:
         """
         info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
 
-        # 获取认证令牌（传入client用于匿名Token获取）
+        # 获取认证令牌
         token = await self.get_token(http_client=client)
 
-        # 检查匿名Token是否尝试使用视觉模型
-        token_pool = await get_token_pool()
         messages = request.get("messages", [])
-        
-        if token_pool.is_anonymous_token(token) and self._has_image_content(messages):
-            error_log("[ERROR] 匿名Token尝试使用视觉功能被拒绝")
-            raise HTTPException(
-                status_code=400,
-                detail="匿名Token不支持图像识别功能，请配置ZAI_TOKEN使用视觉模型。设置环境变量ZAI_TOKEN=your_token后重启服务。"
-            )
 
         # 确定请求的模型特性
         requested_model = request.get("model", settings.PRIMARY_MODEL)

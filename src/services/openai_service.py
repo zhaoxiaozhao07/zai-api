@@ -20,14 +20,6 @@ from ..helpers import (
 )
 from ..schemas import OpenAIRequest
 from ..config import settings
-from ..toolify.detector import StreamingFunctionCallDetector
-from ..toolify_handler import (
-    should_enable_toolify,
-    prepare_toolify_request,
-    parse_toolify_response,
-    format_toolify_response_for_stream,
-)
-from ..toolify_config import get_toolify
 from ..zai_transformer import ZAITransformer
 from ..token_pool import get_token_pool
 from .network_manager import network_manager
@@ -39,28 +31,27 @@ class ChatCompletionService:
     def __init__(self) -> None:
         self.transformer = ZAITransformer()
 
-    async def prepare_request(self, request: OpenAIRequest) -> Tuple[dict, dict, bool]:
+    async def prepare_request(self, request: OpenAIRequest) -> Tuple[dict, dict]:
         request_dict = request.model_dump()
         return self._prepare_messages(request, request_dict)
 
-    def _prepare_messages(self, request: OpenAIRequest, request_dict: dict) -> Tuple[dict, dict, bool]:
-        enable_toolify = should_enable_toolify(request_dict)
+    def _prepare_messages(self, request: OpenAIRequest, request_dict: dict) -> Tuple[dict, dict]:
         messages = [
             msg.model_dump() if hasattr(msg, "model_dump") else msg
             for msg in request.messages
         ]
-
-        if enable_toolify:
-            info_log("[TOOLIFY] 工具调用功能已启用")
-            messages, _ = prepare_toolify_request(request_dict, messages)
-            transformed_dict = request_dict.copy()
-            transformed_dict.pop("tools", None)
-            transformed_dict.pop("tool_choice", None)
-            transformed_dict["messages"] = messages
-        else:
-            transformed_dict = request_dict
-
-        return request_dict, transformed_dict, enable_toolify
+        
+        # 移除 tools 和 tool_choice 参数（上游不支持）
+        transformed_dict = request_dict.copy()
+        if "tools" in transformed_dict:
+            del transformed_dict["tools"]
+            info_log("[请求处理] 已移除 tools 参数（上游不支持）")
+        if "tool_choice" in transformed_dict:
+            del transformed_dict["tool_choice"]
+            info_log("[请求处理] 已移除 tool_choice 参数（上游不支持）")
+        
+        transformed_dict["messages"] = messages
+        return request_dict, transformed_dict
 
     async def build_transformed(self, request_dict: dict, client: httpx.AsyncClient, upstream: str) -> dict:
         request_stage_log("transform_in", "开始转换请求格式: OpenAI -> Z.AI", upstream=upstream)
@@ -92,7 +83,6 @@ class ChatCompletionService:
         self,
         request: OpenAIRequest,
         transformed: dict,
-        enable_toolify: bool,
         request_client: httpx.AsyncClient,
         current_proxy: Optional[str],
         current_upstream: str,
@@ -322,32 +312,6 @@ class ChatCompletionService:
                         "total_tokens": 0,
                     }
 
-                    # 检查 Toolify 工具调用
-                    if enable_toolify and answer_content:
-                        debug_log("[TOOLIFY] 检查非流式响应中的工具调用")
-                        tool_response = parse_toolify_response(answer_content, request.model)
-                        if tool_response:
-                            info_log("[TOOLIFY] 非流式响应中检测到工具调用")
-                            request_stage_log(
-                                "non_stream_toolify",
-                                "非流式响应中检测到工具调用",
-                                finish_reason="tool_calls",
-                            )
-                            return {
-                                "id": transformed["body"]["chat_id"],
-                                "object": "chat.completion",
-                                "created": int(time.time()),
-                                "model": request.model,
-                                "choices": [
-                                    {
-                                        "index": 0,
-                                        "message": tool_response,
-                                        "finish_reason": "tool_calls",
-                                    }
-                                ],
-                                "usage": usage_info,
-                            }
-
                     request_stage_log(
                         "non_stream_completed",
                         "非流式响应完成",
@@ -417,20 +381,12 @@ class ChatCompletionService:
         current_upstream: str,
         request_dict_for_transform: dict,
         json_lib,
-        enable_toolify: bool,
     ) -> AsyncIterator[str]:
         bind_request_context(mode="stream")
         request_stage_log("stream_pipeline", "进入流式处理流程")
         retry_count = 0
         last_error = None
         last_status_code = None
-
-        toolify_detector = None
-        if enable_toolify:
-            toolify_instance = get_toolify()
-            if toolify_instance:
-                toolify_detector = StreamingFunctionCallDetector(toolify_instance.trigger_signal)
-                debug_log("[TOOLIFY] 流式工具调用检测器已初始化")
 
         while retry_count <= settings.MAX_RETRIES:
             try:
@@ -522,31 +478,6 @@ class ChatCompletionService:
 
                         chunk_str = line[5:].strip()
                         if not chunk_str or chunk_str == "[DONE]":
-                            if chunk_str == "[DONE]" and toolify_detector:
-                                parsed_tools, remaining_content = toolify_detector.finalize()
-                                if remaining_content:
-                                    # 清理可能包含的think标签
-                                    remaining_content = remaining_content.replace("<think>", "").replace("</think>", "")
-                                    
-                                    if remaining_content:
-                                        if not has_thinking:
-                                            has_thinking = True
-                                            yield self._build_role_chunk(json_lib, transformed, request)
-                                        yield self._build_content_chunk(json_lib, transformed, request, remaining_content)
-
-                                if parsed_tools:
-                                    for chunk in format_toolify_response_for_stream(
-                                        parsed_tools,
-                                        request.model,
-                                        transformed["body"]["chat_id"],
-                                    ):
-                                        yield chunk
-                                    request_stage_log(
-                                        "stream_toolify_completed",
-                                        "流式响应（早期工具调用检测）完成",
-                                    )
-                                    return
-
                             if chunk_str == "[DONE]":
                                 yield "data: [DONE]\n\n"
                             continue
@@ -667,22 +598,6 @@ class ChatCompletionService:
                                 answer_accumulator += delta_content
                             continue
 
-                        # Toolify 工具检测（如果启用）
-                        if enable_toolify and toolify_detector and delta_content:
-                            yielded, should_continue, processed, has_thinking = self._process_toolify_detection(
-                                toolify_detector,
-                                delta_content,
-                                has_thinking,
-                                transformed,
-                                request,
-                                json_lib,
-                            )
-                            for chunk in yielded:
-                                yield chunk
-                            if should_continue:
-                                continue
-                            delta_content = processed
-
                         # other 阶段：可能有 usage 信息，也可能携带正文的最后一小段（edit_content 或 delta_content）
                         # 如果带有 edit_index，说明是工具调用相关内容，应放入思考
                         if phase == "other":
@@ -778,7 +693,7 @@ class ChatCompletionService:
     async def _mark_token_success(self, transformed: dict) -> None:
         token_pool = await get_token_pool()
         current_token = transformed.get("token", "")
-        if current_token and not token_pool.is_anonymous_token(current_token):
+        if current_token:
             token_pool.mark_token_success(current_token)
 
     async def _handle_retryable_error(
@@ -797,51 +712,31 @@ class ChatCompletionService:
 
         token_pool = await get_token_pool()
         current_token = transformed.get("token", "")
-        is_anonymous = token_pool.is_anonymous_token(current_token)
-
-        if is_anonymous:
-            info_log(f"[ANONYMOUS] 检测到匿名Token错误 {status_code}，清理缓存并重新获取")
-            await self.transformer.clear_anonymous_token_cache()
-            await self.transformer.refresh_header_template()
-            await network_manager.cleanup_current_client(current_proxy)
-            new_client, new_proxy = await network_manager.get_request_client()
-            request_client = new_client
-            current_proxy = new_proxy
-
-            if network_manager.has_upstream_pool() and network_manager.upstream_strategy == "failover":
-                await network_manager.switch_upstream_on_failure()
-                info_log("[FAILOVER] 匿名Token错误，尝试切换上游地址")
-
-            current_upstream = await network_manager.get_next_upstream()
-            transformed = await self.transformer.transform_request_in(
-                request_dict_for_transform,
-                client=request_client,
-                upstream_url=current_upstream,
-            )
-            info_log("[OK] 已获取新的匿名Token并重新生成请求")
-        else:
+        
+        # Token 错误处理：标记失败并切换
+        if current_token:
             token_pool.mark_token_failure(current_token)
-            info_log(f"[CONFIG] 配置Token错误 {status_code}，切换Token")
+        info_log(f"[TOKEN] Token错误 {status_code}，切换Token")
 
-            await self.transformer.switch_token()
-            await self.transformer.refresh_header_template()
+        await self.transformer.switch_token()
+        await self.transformer.refresh_header_template()
+        current_upstream = await network_manager.get_next_upstream()
+        transformed = await self.transformer.transform_request_in(
+            request_dict_for_transform,
+            client=request_client,
+            upstream_url=current_upstream,
+        )
+        info_log("[OK] 已切换到下一个配置Token")
+
+        if network_manager.has_upstream_pool() and network_manager.upstream_strategy == "failover":
+            await network_manager.switch_upstream_on_failure()
             current_upstream = await network_manager.get_next_upstream()
             transformed = await self.transformer.transform_request_in(
                 request_dict_for_transform,
                 client=request_client,
                 upstream_url=current_upstream,
             )
-            info_log("[OK] 已切换到下一个配置Token")
-
-            if network_manager.has_upstream_pool() and network_manager.upstream_strategy == "failover":
-                await network_manager.switch_upstream_on_failure()
-                current_upstream = await network_manager.get_next_upstream()
-                transformed = await self.transformer.transform_request_in(
-                    request_dict_for_transform,
-                    client=request_client,
-                    upstream_url=current_upstream,
-                )
-                info_log("[FAILOVER] Token错误，已切换上游")
+            info_log("[FAILOVER] Token错误，已切换上游")
 
         if status_code in [502, 503, 504]:
             if network_manager.has_proxy_pool() and network_manager.proxy_strategy == "failover":
@@ -858,40 +753,10 @@ class ChatCompletionService:
 
         return True, transformed, request_client, current_proxy, current_upstream
 
-    def _process_toolify_detection(
-        self,
-        toolify_detector,
-        delta_content: str,
-        has_thinking: bool,
-        transformed: dict,
-        request: OpenAIRequest,
-        json_lib,
-    ) -> Tuple[list, bool, str, bool]:
-        chunks_to_yield = []
-
-        if not toolify_detector or not delta_content:
-            return chunks_to_yield, False, delta_content, has_thinking
-
-        debug_log("[TOOLIFY] 调用工具检测器")
-        is_tool_detected, content_to_yield = toolify_detector.process_chunk(delta_content)
-
-        if is_tool_detected:
-            if content_to_yield:
-                if not has_thinking:
-                    has_thinking = True
-                    chunks_to_yield.append(self._build_role_chunk(json_lib, transformed, request))
-                chunks_to_yield.append(
-                    self._build_content_chunk(json_lib, transformed, request, content_to_yield)
-                )
-
-            return chunks_to_yield, True, "", has_thinking
-
-        return chunks_to_yield, False, content_to_yield, has_thinking
-
     async def mark_token_success_if_configured(self, transformed: dict) -> None:
         token_pool = await get_token_pool()
         current_token = transformed.get("token", "")
-        if current_token and not token_pool.is_anonymous_token(current_token):
+        if current_token:
             token_pool.mark_token_success(current_token)
 
     def _build_role_chunk(self, json_lib, transformed: dict, request: OpenAIRequest) -> str:
