@@ -153,6 +153,7 @@ class Settings(BaseSettings):
     GLM_46_THINKING_MODEL: str = os.getenv("GLM_46_THINKING_MODEL", "GLM-4.6-Thinking")
     GLM_46_SEARCH_MODEL: str = os.getenv("GLM_46_SEARCH_MODEL", "GLM-4.6-Search")
     GLM_46_ADVANCED_SEARCH_MODEL: str = os.getenv("GLM_46_ADVANCED_SEARCH_MODEL", "GLM-4.6-advanced-search")
+    GLM_46V_MODEL: str = os.getenv("GLM_46V_MODEL", "GLM-4.6V")
     
     # Server Configuration
     LISTEN_PORT: int = int(os.getenv("LISTEN_PORT", "8080"))
@@ -238,5 +239,6 @@ MODEL_MAPPING = {
     settings.GLM_46_THINKING_MODEL: "GLM-4-6-API-V1",
     settings.GLM_46_SEARCH_MODEL: "GLM-4-6-API-V1",
     settings.GLM_46_ADVANCED_SEARCH_MODEL: "GLM-4-6-API-V1",
+    settings.GLM_46V_MODEL: "glm-4.6v",
 }
 

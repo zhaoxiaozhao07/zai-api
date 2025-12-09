@@ -360,7 +360,7 @@ class ZAITransformer:
         
         Args:
             messages: 原始消息列表
-            is_vision_model: 是否是视觉模型（GLM-4.5V），视觉模型保留图片在messages中
+            is_vision_model: 是否是视觉模型（GLM-4.5V/GLM-4.6V），视觉模型保留图片在messages中
             
         Returns:
             (处理后的消息列表, 图片URL列表)
@@ -478,7 +478,8 @@ class ZAITransformer:
         is_search = (requested_model == settings.SEARCH_MODEL or
                     requested_model == settings.GLM_46_SEARCH_MODEL)
         is_advanced_search = (requested_model == settings.GLM_46_ADVANCED_SEARCH_MODEL)
-        is_vision_model = (requested_model == settings.GLM_45V_MODEL)
+        is_vision_model = (requested_model == settings.GLM_45V_MODEL or
+                          requested_model == settings.GLM_46V_MODEL)
 
         # 获取上游模型ID
         upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
@@ -508,7 +509,7 @@ class ZAITransformer:
 
         # 处理图像上传
         files_list = []
-        uploaded_files_map = {}  # 用于GLM-4.5V：原始URL -> 文件信息的映射
+        uploaded_files_map = {}  # 用于视觉模型(GLM-4.5V/GLM-4.6V)：原始URL -> 文件信息的映射
         
         if image_urls and client:
             info_log(f"检测到 {len(image_urls)} 张图像，开始上传")
@@ -535,7 +536,7 @@ class ZAITransformer:
         current_user_message_id = generate_uuid() if is_vision_model else None
         
         if is_vision_model and uploaded_files_map:
-            info_log(f"[GLM-4.5V] 开始修改消息中的图片URL格式")
+            info_log(f"[Vision] 开始修改消息中的图片URL格式")
             for msg in messages:
                 if msg.get("role") == "user" and isinstance(msg.get("content"), list):
                     for part in msg["content"]:
