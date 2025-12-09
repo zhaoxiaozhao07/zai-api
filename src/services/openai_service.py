@@ -234,10 +234,19 @@ class ChatCompletionService:
                         if data.get("usage"):
                             latest_usage = data["usage"]
 
-                        # tool_call 阶段：如果带有 edit_index，将 edit_content 累积到 thinking
+                        # tool_call 阶段：如果带有 edit_index，优先检测图片，否则放入 thinking
                         if phase == "tool_call":
                             if data.get("edit_index") is not None and edit_content:
-                                thinking_content += edit_content
+                                # 先检测是否有图片
+                                image_urls = self._extract_image_urls(edit_content)
+                                if image_urls:
+                                    # 有图片，转换为markdown格式放入 answer_content
+                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    if markdown_images:
+                                        answer_content += "\n\n" + markdown_images + "\n\n"
+                                else:
+                                    # 无图片，放入 thinking_content
+                                    thinking_content += edit_content
                             continue
 
                         # thinking 阶段：累积 delta_content（只用于兜底，优先用 answer/other 阶段的完整 edit_content）
@@ -276,8 +285,16 @@ class ChatCompletionService:
 
                             if tail_text:
                                 if has_edit_index:
-                                    # 带 edit_index 的内容放入 thinking_content
-                                    thinking_content += tail_text
+                                    # 带 edit_index 的内容：先检测是否有图片
+                                    image_urls = self._extract_image_urls(tail_text)
+                                    if image_urls:
+                                        # 有图片，转换为markdown格式放入 answer_content
+                                        markdown_images = self._format_images_as_markdown(image_urls)
+                                        if markdown_images:
+                                            answer_content += "\n\n" + markdown_images + "\n\n"
+                                    else:
+                                        # 无图片，放入 thinking_content
+                                        thinking_content += tail_text
                                 else:
                                     # 普通内容放入 answer_content
                                     answer_content += tail_text
@@ -571,19 +588,29 @@ class ChatCompletionService:
                                 return
                             continue
 
-                        # tool_call 阶段：如果带有 edit_index，将 edit_content 作为思考内容输出
+                        # tool_call 阶段：如果带有 edit_index，优先检测图片，否则放入思考
                         if phase == "tool_call":
                             if data.get("edit_index") is not None and edit_content:
                                 if not has_thinking:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
-                                # 计算新增的思考内容
-                                new_thinking = self._diff_new_content(thinking_accumulator, edit_content)
-                                if new_thinking:
-                                    cleaned = self._clean_thinking(new_thinking)
-                                    if cleaned:
-                                        yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
-                                        thinking_accumulator += new_thinking
+                                
+                                # 先检测是否有图片（包括 image_reference 工具返回的图片）
+                                image_urls = self._extract_image_urls(edit_content)
+                                if image_urls:
+                                    # 有图片，转换为markdown格式放入正文
+                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    if markdown_images:
+                                        yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
+                                        answer_accumulator += markdown_images
+                                else:
+                                    # 无图片，计算新增的思考内容
+                                    new_thinking = self._diff_new_content(thinking_accumulator, edit_content)
+                                    if new_thinking:
+                                        cleaned = self._clean_thinking(new_thinking)
+                                        if cleaned:
+                                            yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                            thinking_accumulator += new_thinking
                             continue
 
                         # thinking 阶段：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
@@ -679,13 +706,22 @@ class ChatCompletionService:
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
                                 if has_edit_index:
-                                    # 带 edit_index 的内容放入 reasoning_content（思考）
-                                    new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
-                                    if new_thinking:
-                                        cleaned = self._clean_thinking(new_thinking)
-                                        if cleaned:
-                                            yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
-                                            thinking_accumulator += new_thinking
+                                    # 带 edit_index 的内容：先检测是否有图片
+                                    image_urls = self._extract_image_urls(tail_text)
+                                    if image_urls:
+                                        # 有图片，转换为markdown格式放入正文
+                                        markdown_images = self._format_images_as_markdown(image_urls)
+                                        if markdown_images:
+                                            yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
+                                            answer_accumulator += markdown_images
+                                    else:
+                                        # 无图片，放入 reasoning_content（思考）
+                                        new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
+                                        if new_thinking:
+                                            cleaned = self._clean_thinking(new_thinking)
+                                            if cleaned:
+                                                yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                                thinking_accumulator += new_thinking
                                 else:
                                     # 普通内容放入 content（正文）
                                     yield self._build_content_chunk(json_lib, transformed, request, tail_text)
@@ -973,6 +1009,83 @@ class ChatCompletionService:
             except Exception as exc:
                 debug_log("[搜索信息] 提取失败", error=str(exc))
         return reasoning_content
+
+    def _extract_image_urls(self, content: str) -> list:
+        """从上游响应内容中提取图片URL
+        
+        处理格式示例：
+        1. {"image_url":{"url":"https://qc4n.bigmodel.cn/xxx.png?..."}}
+        2. {"img_url": "https://bigmodel-us3-prod-agent.cn-wlcb.ufileos.com/xxx.jpg", ...}
+        
+        Returns:
+            list: 提取到的图片URL列表
+        """
+        import re
+        
+        if not content:
+            return []
+        
+        image_urls = []
+        
+        # === 格式1: image_url 类型（bigmodel.cn 域名）===
+        # 匹配 "type":"image_url" 后面的 "url":"xxx" 模式
+        if '"type\\":\\"image_url\\"' in content or '"type":"image_url"' in content:
+            # 模式1：转义JSON格式 \"url\":\"xxx\"
+            pattern1 = r'\"url\":\s*\"(https?://[^\"\\]+(?:\\.[^\"\\]+)*[^\"\\]*)\"'
+            # 模式2：普通JSON格式 "url":"xxx"
+            pattern2 = r'"url":\s*"(https?://[^"]+)"'
+            
+            matches = re.findall(pattern1, content)
+            for url in matches:
+                clean_url = url.replace('\\/', '/').replace('\\"', '"')
+                if clean_url and 'bigmodel.cn' in clean_url:
+                    image_urls.append(clean_url)
+            
+            if not image_urls:
+                matches = re.findall(pattern2, content)
+                for url in matches:
+                    if url and 'bigmodel.cn' in url:
+                        image_urls.append(url)
+        
+        # === 格式2: img_url 类型（ufileos.com 域名，image_reference 工具调用）===
+        # 匹配 "img_url": "https://xxx.ufileos.com/xxx.jpg" 模式
+        if 'img_url' in content or 'image_reference' in content:
+            # 转义JSON格式: \"img_url\": \"xxx\"
+            pattern_img = r'\\\"img_url\\\":\s*\\\"(https?://[^\\\"]+)\\\"'
+            matches = re.findall(pattern_img, content)
+            for url in matches:
+                clean_url = url.replace('\\/', '/')
+                if clean_url and ('ufileos.com' in clean_url or 'bigmodel' in clean_url):
+                    image_urls.append(clean_url)
+            
+            # 普通JSON格式: "img_url": "xxx"
+            if not image_urls:
+                pattern_img2 = r'"img_url":\s*"(https?://[^"]+)"'
+                matches = re.findall(pattern_img2, content)
+                for url in matches:
+                    if url and ('ufileos.com' in url or 'bigmodel' in url):
+                        image_urls.append(url)
+        
+        return image_urls
+
+    def _format_images_as_markdown(self, image_urls: list) -> str:
+        """将图片URL列表格式化为markdown图片格式
+        
+        Args:
+            image_urls: 图片URL列表
+            
+        Returns:
+            str: markdown格式的图片字符串
+        """
+        if not image_urls:
+            return ""
+        
+        markdown_images = []
+        for i, url in enumerate(image_urls, 1):
+            # 生成markdown图片格式
+            markdown_images.append(f"![图片{i}]({url})")
+        
+        return "\n\n".join(markdown_images)
 
     def _clean_thinking(self, delta_content: str) -> str:
         """清理 thinking 内容，提取纯文本
