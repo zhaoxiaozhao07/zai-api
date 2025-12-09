@@ -234,8 +234,10 @@ class ChatCompletionService:
                         if data.get("usage"):
                             latest_usage = data["usage"]
 
-                        # 跳过 tool_call 阶段
+                        # tool_call 阶段：如果带有 edit_index，将 edit_content 累积到 thinking
                         if phase == "tool_call":
+                            if data.get("edit_index") is not None and edit_content:
+                                thinking_content += edit_content
                             continue
 
                         # thinking 阶段：累积 delta_content（只用于兜底，优先用 answer/other 阶段的完整 edit_content）
@@ -255,13 +257,17 @@ class ChatCompletionService:
                                 answer_content += delta_content
                             continue
 
-                        # other 阶段：可能有 usage 信息，也可能有最后的 edit_content 片段（例如句号）
+                        # other 阶段：可能有 usage 信息，也可能有最后的 edit_content 片段
+                        # 如果带有 edit_index，说明是工具调用相关内容，应放入 thinking
                         if phase == "other":
                             # 收集 usage
                             if data.get("usage"):
                                 latest_usage = data["usage"]
 
-                            # 将最后一小段正文（edit_content 或 delta_content）也并入 answer_content，保证非流式正文完整
+                            # 判断是否是工具调用相关内容（带 edit_index）
+                            has_edit_index = data.get("edit_index") is not None
+
+                            # 获取内容
                             tail_text = None
                             if edit_content:
                                 tail_text = edit_content
@@ -269,7 +275,12 @@ class ChatCompletionService:
                                 tail_text = delta_content
 
                             if tail_text:
-                                answer_content += tail_text
+                                if has_edit_index:
+                                    # 带 edit_index 的内容放入 thinking_content
+                                    thinking_content += tail_text
+                                else:
+                                    # 普通内容放入 answer_content
+                                    answer_content += tail_text
                             continue
 
                     # 如果上游在 answer/other 阶段给出了完整的 edit_content（含 </details>），
@@ -560,8 +571,19 @@ class ChatCompletionService:
                                 return
                             continue
 
-                        # 跳过 tool_call 阶段
+                        # tool_call 阶段：如果带有 edit_index，将 edit_content 作为思考内容输出
                         if phase == "tool_call":
+                            if data.get("edit_index") is not None and edit_content:
+                                if not has_thinking:
+                                    has_thinking = True
+                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                # 计算新增的思考内容
+                                new_thinking = self._diff_new_content(thinking_accumulator, edit_content)
+                                if new_thinking:
+                                    cleaned = self._clean_thinking(new_thinking)
+                                    if cleaned:
+                                        yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                        thinking_accumulator += new_thinking
                             continue
 
                         # thinking 阶段：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
@@ -635,14 +657,17 @@ class ChatCompletionService:
                             delta_content = processed
 
                         # other 阶段：可能有 usage 信息，也可能携带正文的最后一小段（edit_content 或 delta_content）
+                        # 如果带有 edit_index，说明是工具调用相关内容，应放入思考
                         if phase == "other":
                             # 1) 先处理 usage
                             if data.get("usage"):
                                 yield self._build_usage_chunk(json_lib, transformed, request, data["usage"])
 
-                            # 2) 再处理正文增量
+                            # 2) 判断是否是工具调用相关内容（带 edit_index）
+                            has_edit_index = data.get("edit_index") is not None
+                            
+                            # 3) 处理内容
                             tail_text = None
-                            # 上游有时会把最后一个标点放在 edit_content 里（例如："edit_content": "。"）
                             if edit_content:
                                 tail_text = edit_content
                             elif delta_content:
@@ -652,7 +677,18 @@ class ChatCompletionService:
                                 if not has_thinking:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
-                                yield self._build_content_chunk(json_lib, transformed, request, tail_text)
+                                
+                                if has_edit_index:
+                                    # 带 edit_index 的内容放入 reasoning_content（思考）
+                                    new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
+                                    if new_thinking:
+                                        cleaned = self._clean_thinking(new_thinking)
+                                        if cleaned:
+                                            yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                            thinking_accumulator += new_thinking
+                                else:
+                                    # 普通内容放入 content（正文）
+                                    yield self._build_content_chunk(json_lib, transformed, request, tail_text)
                             continue
 
                         # 输出 usage 信息
