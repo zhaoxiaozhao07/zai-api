@@ -552,6 +552,8 @@ class ChatCompletionService:
                     
                     # 检查是否为thinking模型，非thinking模型不输出 reasoning_content
                     is_thinking_model = transformed.get("is_thinking", False)
+                    # 检查是否为 V 系列视觉模型（4.5v/4.6v），用于区分多阶段思考格式
+                    is_vision_model = transformed.get("is_vision_model", False)
 
                     async for line in response.aiter_lines():
                         if not line or not line.strip():
@@ -643,21 +645,32 @@ class ChatCompletionService:
                                     if markdown_images:
                                         yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                         answer_accumulator += markdown_images
+                                
+                                # 检测是否包含 <glm_block> 标签
+                                # 如果包含，需要拆分：glm_block 前的内容是正文，glm_block 本身是工具调用
+                                if "<glm_block" in edit_content:
+                                    import re
+                                    # 拆分 glm_block 前的内容（正文）和 glm_block 本身
+                                    glm_block_match = re.search(r'<glm_block[^>]*>.*?</glm_block>', edit_content, re.DOTALL)
+                                    if glm_block_match:
+                                        # glm_block 前的内容是正文
+                                        before_glm_block = edit_content[:glm_block_match.start()].strip()
+                                        if before_glm_block:
+                                            new_answer = self._diff_new_content(answer_accumulator, before_glm_block)
+                                            if new_answer:
+                                                yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                                answer_accumulator += new_answer
+                                        # glm_block 本身不输出（工具调用细节）
                                 else:
-                                    # 无图片的内容处理
-                                    new_thinking = self._diff_new_content(thinking_accumulator, edit_content)
-                                    if new_thinking:
-                                        cleaned = self._clean_thinking(new_thinking)
-                                        if cleaned:
-                                            # 非thinking模型：放入正文content
-                                            if not is_thinking_model:
-                                                yield self._build_content_chunk(json_lib, transformed, request, cleaned)
-                                                answer_accumulator += cleaned
-                                            else:
-                                                # thinking模型：放入 reasoning_content
-                                                yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
-                                            thinking_accumulator += new_thinking
+                                    # 没有 glm_block，整个内容是正文的追加
+                                    cleaned = self._clean_thinking(edit_content)
+                                    if cleaned:
+                                        new_answer = self._diff_new_content(answer_accumulator, cleaned)
+                                        if new_answer:
+                                            yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                            answer_accumulator += new_answer
                             continue
+
 
                         # thinking 阶段处理
                         if phase == "thinking":
@@ -712,8 +725,9 @@ class ChatCompletionService:
                         if phase == "answer":
                             has_edit_index = data.get("edit_index") is not None
                             
-                            # 带 edit_index 的 edit_content 可能包含 思考+正文 混合内容
-                            # 需要拆分后分别处理
+                            # 带 edit_index 的 edit_content 可能包含 思考+正文 混合内容（V 系列模型）
+                            # 或者只是正文的追加内容（thinking 系列模型）
+                            # 通过检测 </details> 标签来区分
                             if has_edit_index and edit_content:
                                 if not has_thinking:
                                     has_thinking = True
@@ -727,29 +741,37 @@ class ChatCompletionService:
                                         yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                         answer_accumulator += markdown_images
                                 
-                                # 使用 _split_edit_content 拆分思考和正文
-                                thinking_part, answer_part = self._split_edit_content(edit_content)
-                                
-                                # 处理思考部分
-                                if thinking_part:
-                                    new_thinking = self._diff_new_content(thinking_accumulator, thinking_part)
-                                    if new_thinking:
-                                        if not is_thinking_model:
-                                            # 非 thinking 模型：思考内容放入正文
-                                            yield self._build_content_chunk(json_lib, transformed, request, new_thinking)
-                                            answer_accumulator += new_thinking
-                                        else:
-                                            # thinking 模型：思考内容放入 reasoning_content
-                                            yield self._build_reasoning_chunk(json_lib, transformed, request, new_thinking)
-                                        thinking_accumulator += new_thinking
-                                
-                                # 处理正文部分
-                                if answer_part:
-                                    new_answer = self._diff_new_content(answer_accumulator, answer_part)
-                                    if new_answer:
-                                        yield self._build_content_chunk(json_lib, transformed, request, new_answer)
-                                        answer_accumulator += new_answer
+                                # 只有包含 </details> 标签时才拆分思考和正文（V 系列模型的多阶段思考）
+                                if "</details>" in edit_content:
+                                    thinking_part, answer_part = self._split_edit_content(edit_content)
+                                    
+                                    # 处理思考部分
+                                    if thinking_part:
+                                        new_thinking = self._diff_new_content(thinking_accumulator, thinking_part)
+                                        if new_thinking:
+                                            if not is_thinking_model:
+                                                yield self._build_content_chunk(json_lib, transformed, request, new_thinking)
+                                                answer_accumulator += new_thinking
+                                            else:
+                                                yield self._build_reasoning_chunk(json_lib, transformed, request, new_thinking)
+                                            thinking_accumulator += new_thinking
+                                    
+                                    # 处理正文部分
+                                    if answer_part:
+                                        new_answer = self._diff_new_content(answer_accumulator, answer_part)
+                                        if new_answer:
+                                            yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                            answer_accumulator += new_answer
+                                else:
+                                    # 没有 details 标签，整个内容当作正文处理（thinking 系列模型）
+                                    cleaned = self._clean_thinking(edit_content)  # 清理可能的其他标签
+                                    if cleaned:
+                                        new_answer = self._diff_new_content(answer_accumulator, cleaned)
+                                        if new_answer:
+                                            yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                            answer_accumulator += new_answer
                                 continue
+
 
                             
                             # 不带 edit_index 的 delta_content 是正文内容
@@ -812,18 +834,30 @@ class ChatCompletionService:
                                             answer_accumulator += markdown_images
                                     else:
                                         # 无图片的内容处理
-                                        new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
-                                        if new_thinking:
-                                            cleaned = self._clean_thinking(new_thinking)
+                                        # V 系列模型：当作思考内容处理
+                                        # thinking 系列模型：当作正文末尾补充
+                                        if is_vision_model:
+                                            # V 系列模型：思考内容
+                                            new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
+                                            if new_thinking:
+                                                cleaned = self._clean_thinking(new_thinking)
+                                                if cleaned:
+                                                    if not is_thinking_model:
+                                                        yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                                        answer_accumulator += cleaned
+                                                    else:
+                                                        yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                                    thinking_accumulator += new_thinking
+                                        else:
+                                            # thinking 系列模型：正文末尾补充
+                                            cleaned = self._clean_thinking(tail_text)
                                             if cleaned:
-                                                # 非thinking模型：放入正文content
-                                                if not is_thinking_model:
-                                                    yield self._build_content_chunk(json_lib, transformed, request, cleaned)
-                                                    answer_accumulator += cleaned
-                                                else:
-                                                    # thinking模型：放入 reasoning_content
-                                                    yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
-                                                thinking_accumulator += new_thinking
+                                                new_answer = self._diff_new_content(answer_accumulator, cleaned)
+                                                if new_answer:
+                                                    yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                                    answer_accumulator += new_answer
+
+
                                 else:
                                     # 普通内容放入 content（正文）
                                     yield self._build_content_chunk(json_lib, transformed, request, tail_text)

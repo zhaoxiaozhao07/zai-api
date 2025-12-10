@@ -705,4 +705,5 @@ class ZAITransformer:
             "config": config,
             "token": token,
             "is_thinking": is_thinking,  # 标记是否为thinking模型，响应处理时用于判断是否输出reasoning_content
+            "is_vision_model": is_vision_model,  # 标记是否为V系列视觉模型（4.5v/4.6v），用于区分多阶段思考格式
         }

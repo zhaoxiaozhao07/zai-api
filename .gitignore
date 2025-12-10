@@ -61,3 +61,5 @@ proxys*.txt
 debug/
 
 *.json
+*.jsonl
+temp-response-store/
