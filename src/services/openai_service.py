@@ -252,22 +252,47 @@ class ChatCompletionService:
                                     thinking_content += edit_content
                             continue
 
-                        # thinking 阶段：累积 delta_content（只用于兜底，优先用 answer/other 阶段的完整 edit_content）
+                        # thinking 阶段：清洗后累积 delta_content
                         if phase == "thinking":
                             if delta_content:
-                                thinking_content += delta_content
+                                cleaned = self._clean_thinking(delta_content)
+                                if cleaned:
+                                    thinking_content += cleaned
                             continue
 
-                        # answer 阶段：处理 edit_content（包含完整 thinking+正文）和 delta_content
+
+                        # answer 阶段：处理 edit_content 和 delta_content
+                        # 关键区分：
+                        # - 带 edit_index + edit_content：思考内容的完整版（替换之前的增量）
+                        # - 不带 edit_index + delta_content：实际正文内容
                         if phase == "answer":
-                            # 如果有 edit_content 且包含完整的 </details>，优先用它来解析完整推理+回答
-                            if edit_content and "</details>" in edit_content:
-                                latest_full_edit = edit_content
+                            has_edit_index = data.get("edit_index") is not None
                             
-                            # 累积 answer 的 delta_content
-                            if delta_content:
+                            # 带 edit_index 的 edit_content 是思考内容的完整版
+                            if has_edit_index and edit_content:
+                                # 先提取图片 URL（如有）
+                                image_urls = self._extract_image_urls(edit_content)
+                                if image_urls:
+                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    if markdown_images:
+                                        answer_content += "\n\n" + markdown_images + "\n\n"
+                                
+                                # 记录完整思考内容（用于后续处理）
+                                if "</details>" in edit_content:
+                                    latest_full_edit = edit_content
+                                else:
+                                    # 清洗并累积思考内容
+                                    cleaned = self._clean_thinking(edit_content)
+                                    if cleaned:
+                                        new_thinking = self._diff_new_content(thinking_content, cleaned)
+                                        if new_thinking:
+                                            thinking_content += new_thinking
+                            
+                            # 不带 edit_index 的 delta_content 是正文内容
+                            elif delta_content:
                                 answer_content += delta_content
                             continue
+
 
                         # other 阶段：可能有 usage 信息，也可能有最后的 edit_content 片段
                         # 如果带有 edit_index，说明是工具调用相关内容，应放入 thinking
@@ -641,10 +666,13 @@ class ChatCompletionService:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
-                                # 非thinking模型：将thinking内容放入正文content，而不是reasoning_content
+                                # 非thinking模型：清洗后将thinking内容放入正文content
                                 if not is_thinking_model:
-                                    yield self._build_content_chunk(json_lib, transformed, request, delta_content)
-                                    answer_accumulator += delta_content
+                                    cleaned = self._clean_thinking(delta_content)
+                                    if cleaned:
+                                        yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                        answer_accumulator += cleaned
+
                                 else:
                                     # thinking模型：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
                                     # 先做"原样增量"：直接把本次 delta 里的新增部分先输出
@@ -677,14 +705,54 @@ class ChatCompletionService:
                                             # 这里不再修改 thinking_accumulator，避免与原始增量状态不一致
                             continue
 
-                        # answer 阶段：处理 edit_content（包含完整thinking）和 delta_content
+                        # answer 阶段：处理 edit_content 和 delta_content
+                        # 关键区分：
+                        # - 带 edit_index + edit_content：思考内容的完整版（替换之前的增量），应放入 reasoning_content
+                        # - 不带 edit_index + delta_content：实际正文内容，应放入 content
                         if phase == "answer":
-                            # 如果有 edit_content 且包含完整 thinking，忽略（因为已在 thinking 阶段输出）
-                            if edit_content and "</details>" in edit_content:
-                                # edit_content 包含完整的 thinking，但我们已经通过 delta 输出了
-                                pass
+                            has_edit_index = data.get("edit_index") is not None
                             
-                            # 流式输出 answer 的 delta_content
+                            # 带 edit_index 的 edit_content 可能包含 思考+正文 混合内容
+                            # 需要拆分后分别处理
+                            if has_edit_index and edit_content:
+                                if not has_thinking:
+                                    has_thinking = True
+                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                
+                                # 先提取图片 URL（如有）
+                                image_urls = self._extract_image_urls(edit_content)
+                                if image_urls:
+                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    if markdown_images:
+                                        yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
+                                        answer_accumulator += markdown_images
+                                
+                                # 使用 _split_edit_content 拆分思考和正文
+                                thinking_part, answer_part = self._split_edit_content(edit_content)
+                                
+                                # 处理思考部分
+                                if thinking_part:
+                                    new_thinking = self._diff_new_content(thinking_accumulator, thinking_part)
+                                    if new_thinking:
+                                        if not is_thinking_model:
+                                            # 非 thinking 模型：思考内容放入正文
+                                            yield self._build_content_chunk(json_lib, transformed, request, new_thinking)
+                                            answer_accumulator += new_thinking
+                                        else:
+                                            # thinking 模型：思考内容放入 reasoning_content
+                                            yield self._build_reasoning_chunk(json_lib, transformed, request, new_thinking)
+                                        thinking_accumulator += new_thinking
+                                
+                                # 处理正文部分
+                                if answer_part:
+                                    new_answer = self._diff_new_content(answer_accumulator, answer_part)
+                                    if new_answer:
+                                        yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                        answer_accumulator += new_answer
+                                continue
+
+                            
+                            # 不带 edit_index 的 delta_content 是正文内容
                             if delta_content:
                                 if not has_thinking:
                                     has_thinking = True
@@ -693,6 +761,7 @@ class ChatCompletionService:
                                 yield self._build_content_chunk(json_lib, transformed, request, delta_content)
                                 answer_accumulator += delta_content
                             continue
+
 
                         # Toolify 工具检测（如果启用）
                         if enable_toolify and toolify_detector and delta_content:
@@ -1194,24 +1263,32 @@ class ChatCompletionService:
             if re.search(r'(duration=|last_tool_call_name|view=)', first_line) and re.search(r'[">]$', first_line):
                 delta_content = delta_content[first_newline + 1 :]
 
-        # 1. 移除 <details> 开始标签（包括所有属性）
+        # 1. 移除 <glm_block>...</glm_block> 工具调用块（整个块内容不展示给用户）
+        delta_content = re.sub(r'<glm_block[^>]*>.*?</glm_block>', '', delta_content, flags=re.DOTALL)
+        
+        # 2. 移除 <url>...</url> 标签（图片链接已在别处通过 _extract_image_urls 处理）
+        delta_content = re.sub(r'<url>[^<]*</url>', '', delta_content)
+
+        # 3. 移除 <details> 开始标签（包括所有属性）
         delta_content = re.sub(r'<details[^>]*>', '', delta_content)
         
-        # 2. 移除 </details> 结束标签
+        # 4. 移除 </details> 结束标签
         delta_content = re.sub(r'</details>', '', delta_content)
+
         
-        # 3. 移除 <summary> 标签及其内容（如 "Thinking..." 或 "Thought for X seconds"）
+        # 5. 移除 <summary> 标签及其内容（如 "Thinking..." 或 "Thought for X seconds"）
         delta_content = re.sub(r'<summary[^>]*>.*?</summary>', '', delta_content, flags=re.DOTALL)
         
-        # 4. 移除行首的引用标记 "> "（markdown 格式）
+        # 6. 移除行首的引用标记 "> "（markdown 格式）
         delta_content = re.sub(r'^>\s*', '', delta_content, flags=re.MULTILINE)
         delta_content = re.sub(r'\n>\s*', '\n', delta_content)
         
-        # 5. 移除多余的空行（3个及以上连续换行符）
+        # 7. 移除多余的空行（3个及以上连续换行符）
         delta_content = re.sub(r'\n{3,}', '\n\n', delta_content)
         
-        # 6. 去除首尾空白
+        # 8. 去除首尾空白
         return delta_content.strip()
+
 
     def _split_edit_content(self, edit_content: str) -> Tuple[str, str]:
         """拆分 edit_content，返回 (thinking_part, answer_part)

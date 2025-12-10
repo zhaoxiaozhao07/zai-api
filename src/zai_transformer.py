@@ -474,6 +474,8 @@ class ZAITransformer:
         requested_model = request.get("model", settings.PRIMARY_MODEL)
         is_thinking = (requested_model == settings.THINKING_MODEL or
                       requested_model == settings.GLM_46_THINKING_MODEL or
+                      requested_model == settings.GLM_45V_MODEL or  # glm4.5v 视觉模型也是 thinking 模型
+                      requested_model == settings.GLM_46V_MODEL or  # glm4.6v 视觉模型也是 thinking 模型
                       request.get("reasoning", False))
         is_search = (requested_model == settings.SEARCH_MODEL or
                     requested_model == settings.GLM_46_SEARCH_MODEL)
