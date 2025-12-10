@@ -191,6 +191,9 @@ class ChatCompletionService:
                     answer_content = ""    # 累积 answer 阶段的 delta_content（兜底）
                     latest_full_edit = ""  # 记录最后一个包含 </details> 的 edit_content（完整思考+正文）
                     latest_usage = None
+                    
+                    # 检查是否为thinking模型，非thinking模型不返回 reasoning_content
+                    is_thinking_model = transformed.get("is_thinking", False)
 
                     async for line in response.aiter_lines():
                         if not line:
@@ -357,12 +360,18 @@ class ChatCompletionService:
                     )
 
                     # 构建消息对象
+                    # 对于非thinking模型，将thinking内容合并到正文，不返回 reasoning_content
+                    if not is_thinking_model and thinking_content:
+                        # 非thinking模型：将thinking内容作为前缀添加到answer_content
+                        answer_content = thinking_content + ("\n\n" if answer_content else "") + answer_content
+                        thinking_content = ""  # 清空，不作为reasoning_content返回
+                    
                     message = {
                         "role": "assistant",
                         "content": answer_content,
                     }
-                    # 如果有 thinking 内容，添加 reasoning_content 字段
-                    if thinking_content:
+                    # 只有thinking模型才添加 reasoning_content 字段
+                    if thinking_content and is_thinking_model:
                         message["reasoning_content"] = thinking_content
 
                     return {
@@ -512,6 +521,9 @@ class ChatCompletionService:
                     # 累积已输出的 reasoning/content，用于做增量 diff，避免覆盖式 delta 导致截断
                     thinking_accumulator = ""
                     answer_accumulator = ""
+                    
+                    # 检查是否为thinking模型，非thinking模型不输出 reasoning_content
+                    is_thinking_model = transformed.get("is_thinking", False)
 
                     async for line in response.aiter_lines():
                         if not line or not line.strip():
@@ -604,50 +616,62 @@ class ChatCompletionService:
                                         yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                         answer_accumulator += markdown_images
                                 else:
-                                    # 无图片，计算新增的思考内容
+                                    # 无图片的内容处理
                                     new_thinking = self._diff_new_content(thinking_accumulator, edit_content)
                                     if new_thinking:
                                         cleaned = self._clean_thinking(new_thinking)
                                         if cleaned:
-                                            yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                            # 非thinking模型：放入正文content
+                                            if not is_thinking_model:
+                                                yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                                answer_accumulator += cleaned
+                                            else:
+                                                # thinking模型：放入 reasoning_content
+                                                yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
                                             thinking_accumulator += new_thinking
                             continue
 
-                        # thinking 阶段：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
+                        # thinking 阶段处理
                         if phase == "thinking":
                             if delta_content:
                                 if not has_thinking:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
-                                # 先做“原样增量”：直接把本次 delta 里的新增部分先输出
-                                raw_new = self._diff_new_content(thinking_accumulator, delta_content)
-                                if raw_new:
-                                    cleaned_raw = self._clean_thinking(raw_new)
-                                    if cleaned_raw:
-                                        yield self._build_reasoning_chunk(
-                                            json_lib,
-                                            transformed,
-                                            request,
-                                            cleaned_raw,
-                                        )
-                                        thinking_accumulator += raw_new
+                                # 非thinking模型：将thinking内容放入正文content，而不是reasoning_content
+                                if not is_thinking_model:
+                                    yield self._build_content_chunk(json_lib, transformed, request, delta_content)
+                                    answer_accumulator += delta_content
+                                else:
+                                    # thinking模型：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
+                                    # 先做"原样增量"：直接把本次 delta 里的新增部分先输出
+                                    raw_new = self._diff_new_content(thinking_accumulator, delta_content)
+                                    if raw_new:
+                                        cleaned_raw = self._clean_thinking(raw_new)
+                                        if cleaned_raw:
+                                            yield self._build_reasoning_chunk(
+                                                json_lib,
+                                                transformed,
+                                                request,
+                                                cleaned_raw,
+                                            )
+                                            thinking_accumulator += raw_new
 
-                                # 再做一次基于清洗后的兜底增量，防止上游覆盖式 delta 导致遗漏
-                                cleaned_full = self._clean_thinking(delta_content)
-                                if cleaned_full:
-                                    new_reasoning = self._diff_new_content(
-                                        self._clean_thinking(thinking_accumulator),
-                                        cleaned_full,
-                                    )
-                                    if new_reasoning:
-                                        yield self._build_reasoning_chunk(
-                                            json_lib,
-                                            transformed,
-                                            request,
-                                            new_reasoning,
+                                    # 再做一次基于清洗后的兜底增量，防止上游覆盖式 delta 导致遗漏
+                                    cleaned_full = self._clean_thinking(delta_content)
+                                    if cleaned_full:
+                                        new_reasoning = self._diff_new_content(
+                                            self._clean_thinking(thinking_accumulator),
+                                            cleaned_full,
                                         )
-                                        # 这里不再修改 thinking_accumulator，避免与原始增量状态不一致
+                                        if new_reasoning:
+                                            yield self._build_reasoning_chunk(
+                                                json_lib,
+                                                transformed,
+                                                request,
+                                                new_reasoning,
+                                            )
+                                            # 这里不再修改 thinking_accumulator，避免与原始增量状态不一致
                             continue
 
                         # answer 阶段：处理 edit_content（包含完整thinking）和 delta_content
@@ -715,12 +739,18 @@ class ChatCompletionService:
                                             yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                             answer_accumulator += markdown_images
                                     else:
-                                        # 无图片，放入 reasoning_content（思考）
+                                        # 无图片的内容处理
                                         new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
                                         if new_thinking:
                                             cleaned = self._clean_thinking(new_thinking)
                                             if cleaned:
-                                                yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
+                                                # 非thinking模型：放入正文content
+                                                if not is_thinking_model:
+                                                    yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                                    answer_accumulator += cleaned
+                                                else:
+                                                    # thinking模型：放入 reasoning_content
+                                                    yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
                                                 thinking_accumulator += new_thinking
                                 else:
                                     # 普通内容放入 content（正文）

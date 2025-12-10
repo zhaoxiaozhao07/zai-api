@@ -701,5 +701,6 @@ class ZAITransformer:
         return {
             "body": body,
             "config": config,
-            "token": token
+            "token": token,
+            "is_thinking": is_thinking,  # 标记是否为thinking模型，响应处理时用于判断是否输出reasoning_content
         }
