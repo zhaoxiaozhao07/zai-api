@@ -522,6 +522,9 @@ class ChatCompletionService:
                     thinking_accumulator = ""
                     answer_accumulator = ""
                     
+                    # 累积 usage 信息，用于最终的 finish chunk
+                    latest_usage = None
+                    
                     # 检查是否为thinking模型，非thinking模型不输出 reasoning_content
                     is_thinking_model = transformed.get("is_thinking", False)
 
@@ -710,9 +713,9 @@ class ChatCompletionService:
                         # other 阶段：可能有 usage 信息，也可能携带正文的最后一小段（edit_content 或 delta_content）
                         # 如果带有 edit_index，说明是工具调用相关内容，应放入思考
                         if phase == "other":
-                            # 1) 先处理 usage
+                            # 1) 先累积 usage 信息（稍后在 finish chunk 之后输出）
                             if data.get("usage"):
-                                yield self._build_usage_chunk(json_lib, transformed, request, data["usage"])
+                                latest_usage = data["usage"]
 
                             # 2) 判断是否是工具调用相关内容（带 edit_index）
                             has_edit_index = data.get("edit_index") is not None
@@ -757,21 +760,29 @@ class ChatCompletionService:
                                     yield self._build_content_chunk(json_lib, transformed, request, tail_text)
                             continue
 
-                        # 输出 usage 信息
+                        # 累积 usage 信息（用于最终输出）
                         if data.get("usage"):
-                            yield self._build_usage_chunk(json_lib, transformed, request, data["usage"])
+                            latest_usage = data["usage"]
 
                         # 检查是否为 done 状态
                         if is_done:
-                            finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
+                            # 1. 发送带 usage 的 finish chunk
+                            finish_chunk = self._build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
                             yield finish_chunk
+                            # 2. 如果有 usage 信息，发送独立的 usage chunk
+                            if latest_usage:
+                                yield self._build_usage_chunk(json_lib, transformed, request, latest_usage)
+                            # 3. 发送 [DONE]
                             yield "data: [DONE]\n\n"
                             await self._mark_token_success(transformed)
                             request_stage_log("stream_completed", "流式响应完成", has_error=False)
                             return
 
-                    finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
+                    # 流正常结束，发送 finish chunk 和 usage chunk
+                    finish_chunk = self._build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
                     yield finish_chunk
+                    if latest_usage:
+                        yield self._build_usage_chunk(json_lib, transformed, request, latest_usage)
                     yield "data: [DONE]\n\n"
 
                     await self._mark_token_success(transformed)
@@ -925,18 +936,24 @@ class ChatCompletionService:
             token_pool.mark_token_success(current_token)
 
     def _build_role_chunk(self, json_lib, transformed: dict, request: OpenAIRequest) -> str:
+        """构建角色初始化 chunk（第一个 SSE 块）"""
         return f"data: {json_lib.dumps({
-            'choices': [{
-                'delta': {'role': 'assistant'},
-                'finish_reason': None,
-                'index': 0,
-                'logprobs': None,
-            }],
-            'created': int(time.time()),
-            'id': transformed['body']['chat_id'],
-            'model': request.model,
+            'id': 'chatcmpl-' + transformed['body']['chat_id'],
             'object': 'chat.completion.chunk',
-            'system_fingerprint': 'fp_zai_001',
+            'created': int(time.time()),
+            'model': request.model,
+            'choices': [{
+                'index': 0,
+                'delta': {
+                    'role': 'assistant',
+                    'content': '',
+                    'reasoning_content': None,
+                    'tool_calls': None,
+                },
+                'logprobs': None,
+                'finish_reason': None,
+            }],
+            'usage': None,
         })}\n\n"
 
     def _build_content_chunk(
@@ -946,18 +963,24 @@ class ChatCompletionService:
         request: OpenAIRequest,
         content: str,
     ) -> str:
+        """构建正文内容 chunk"""
         return f"data: {json_lib.dumps({
-            'choices': [{
-                'delta': {'content': content},
-                'finish_reason': None,
-                'index': 0,
-                'logprobs': None,
-            }],
-            'created': int(time.time()),
-            'id': transformed['body']['chat_id'],
-            'model': request.model,
+            'id': 'chatcmpl-' + transformed['body']['chat_id'],
             'object': 'chat.completion.chunk',
-            'system_fingerprint': 'fp_zai_001',
+            'created': int(time.time()),
+            'model': request.model,
+            'choices': [{
+                'index': 0,
+                'delta': {
+                    'role': 'assistant',
+                    'content': content,
+                    'reasoning_content': None,
+                    'tool_calls': None,
+                },
+                'logprobs': None,
+                'finish_reason': None,
+            }],
+            'usage': None,
         })}\n\n"
 
     def _build_reasoning_chunk(
@@ -967,50 +990,81 @@ class ChatCompletionService:
         request: OpenAIRequest,
         reasoning_content: str,
     ) -> str:
-        """构建包含 reasoning_content 的流式响应块"""
+        """构建包含 reasoning_content 的流式响应块（思考/推理内容）"""
         return f"data: {json_lib.dumps({
-            'choices': [{
-                'delta': {'reasoning_content': reasoning_content},
-                'finish_reason': None,
-                'index': 0,
-                'logprobs': None,
-            }],
-            'created': int(time.time()),
-            'id': transformed['body']['chat_id'],
-            'model': request.model,
+            'id': 'chatcmpl-' + transformed['body']['chat_id'],
             'object': 'chat.completion.chunk',
-            'system_fingerprint': 'fp_zai_001',
+            'created': int(time.time()),
+            'model': request.model,
+            'choices': [{
+                'index': 0,
+                'delta': {
+                    'role': 'assistant',
+                    'content': None,
+                    'reasoning_content': reasoning_content,
+                    'tool_calls': None,
+                },
+                'logprobs': None,
+                'finish_reason': None,
+            }],
+            'usage': None,
         })}\n\n"
 
     def _build_usage_chunk(self, json_lib, transformed: dict, request: OpenAIRequest, usage) -> str:
+        """构建 usage 信息 chunk（携带 token 使用统计）"""
+        # 规范化 usage 结构，确保包含所有必需字段
+        normalized_usage = {
+            'prompt_tokens': usage.get('prompt_tokens', 0),
+            'completion_tokens': usage.get('completion_tokens', 0),
+            'total_tokens': usage.get('total_tokens', 0),
+            'prompt_tokens_details': usage.get('prompt_tokens_details', {}),
+            'completion_tokens_details': usage.get('completion_tokens_details', {
+                'reasoning_tokens': 0,
+                'accepted_prediction_tokens': 0,
+                'rejected_prediction_tokens': 0,
+            }),
+        }
         return f"data: {json_lib.dumps({
-            'choices': [{
-                'delta': {},
-                'finish_reason': None,
-                'index': 0,
-                'logprobs': None,
-            }],
-            'created': int(time.time()),
-            'id': transformed['body']['chat_id'],
-            'model': request.model,
+            'id': 'chatcmpl-' + transformed['body']['chat_id'],
             'object': 'chat.completion.chunk',
-            'system_fingerprint': 'fp_zai_001',
-            'usage': usage,
+            'created': int(time.time()),
+            'model': request.model,
+            'choices': [],
+            'usage': normalized_usage,
         })}\n\n"
 
-    def _build_finish_chunk(self, json_lib, transformed: dict, request: OpenAIRequest) -> str:
+    def _build_finish_chunk(self, json_lib, transformed: dict, request: OpenAIRequest, usage: Optional[Dict] = None, finish_reason: str = 'stop') -> str:
+        """构建结束 chunk（包含 finish_reason 和可选的 usage）"""
+        # 如果有 usage 信息，构建完整的 usage 结构
+        chunk_usage = None
+        if usage:
+            chunk_usage = {
+                'prompt_tokens': usage.get('prompt_tokens', 0),
+                'total_tokens': usage.get('total_tokens', 0),
+                'completion_tokens': usage.get('completion_tokens', 0),
+                'estimated_cost': usage.get('estimated_cost'),
+                'prompt_tokens_details': usage.get('prompt_tokens_details', {
+                    'cached_tokens': 0,
+                    'cache_write_tokens': None,
+                }),
+            }
         return f"data: {json_lib.dumps({
-            'choices': [{
-                'delta': {},
-                'finish_reason': 'stop',
-                'index': 0,
-                'logprobs': None,
-            }],
-            'created': int(time.time()),
-            'id': transformed['body']['chat_id'],
-            'model': request.model,
+            'id': 'chatcmpl-' + transformed['body']['chat_id'],
             'object': 'chat.completion.chunk',
-            'system_fingerprint': 'fp_zai_001',
+            'created': int(time.time()),
+            'model': request.model,
+            'choices': [{
+                'index': 0,
+                'delta': {
+                    'role': 'assistant',
+                    'content': None,
+                    'reasoning_content': None,
+                    'tool_calls': None,
+                },
+                'logprobs': None,
+                'finish_reason': finish_reason,
+            }],
+            'usage': chunk_usage,
         })}\n\n"
 
     def _extract_search_info(self, reasoning_content: str, edit_content: str) -> str:
