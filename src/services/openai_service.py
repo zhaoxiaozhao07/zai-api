@@ -17,6 +17,7 @@ from ..helpers import (
     bind_request_context,
     reset_request_context,
     request_stage_log,
+    v_series_debug_log,
 )
 from ..schemas import OpenAIRequest
 from ..config import settings
@@ -555,6 +556,16 @@ class ChatCompletionService:
                     # 检查是否为 V 系列视觉模型（4.5v/4.6v），用于区分多阶段思考格式
                     is_vision_model = transformed.get("is_vision_model", False)
 
+                    # V系列输出响应日志辅助函数
+                    def _log_v_output(output_type: str, content: str):
+                        """记录V系列模型输出给客户端的内容（写入文件，仅debug模式）"""
+                        if is_vision_model and content:
+                            v_series_debug_log(
+                                "V系列输出响应",
+                                output_type=output_type,
+                                content=content,  # 保留完整内容
+                            )
+
                     async for line in response.aiter_lines():
                         if not line or not line.strip():
                             continue
@@ -609,6 +620,17 @@ class ChatCompletionService:
                         is_done = phase == "done" or data.get("done")
                         error_info = data.get("error")
 
+                        # V系列模型上游响应调试日志（写入文件）
+                        if is_vision_model:
+                            v_series_debug_log(
+                                "V系列上游响应",
+                                phase=phase,
+                                delta_content=delta_content,  # 保留完整内容
+                                edit_content=edit_content,    # 保留完整内容
+                                has_edit_index=data.get("edit_index") is not None,
+                                edit_index=data.get("edit_index"),
+                            )
+
                         # 检测上游返回的错误（如内容安全警告）
                         if error_info:
                             error_detail = error_info.get("detail") or error_info.get("content") or "Unknown error"
@@ -658,6 +680,7 @@ class ChatCompletionService:
                                         if before_glm_block:
                                             new_answer = self._diff_new_content(answer_accumulator, before_glm_block)
                                             if new_answer:
+                                                _log_v_output("tool_call_content", new_answer)
                                                 yield self._build_content_chunk(json_lib, transformed, request, new_answer)
                                                 answer_accumulator += new_answer
                                         # glm_block 本身不输出（工具调用细节）
@@ -667,6 +690,7 @@ class ChatCompletionService:
                                     if cleaned:
                                         new_answer = self._diff_new_content(answer_accumulator, cleaned)
                                         if new_answer:
+                                            _log_v_output("tool_call_plain_content", new_answer)
                                             yield self._build_content_chunk(json_lib, transformed, request, new_answer)
                                             answer_accumulator += new_answer
                             continue
@@ -679,10 +703,10 @@ class ChatCompletionService:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
-                                # 非thinking模型：清洗后将thinking内容放入正文content
                                 if not is_thinking_model:
                                     cleaned = self._clean_thinking(delta_content)
                                     if cleaned:
+                                        _log_v_output("thinking_content", cleaned)
                                         yield self._build_content_chunk(json_lib, transformed, request, cleaned)
                                         answer_accumulator += cleaned
 
@@ -693,6 +717,7 @@ class ChatCompletionService:
                                     if raw_new:
                                         cleaned_raw = self._clean_thinking(raw_new)
                                         if cleaned_raw:
+                                            _log_v_output("reasoning_content", cleaned_raw)
                                             yield self._build_reasoning_chunk(
                                                 json_lib,
                                                 transformed,
@@ -709,6 +734,7 @@ class ChatCompletionService:
                                             cleaned_full,
                                         )
                                         if new_reasoning:
+                                            _log_v_output("reasoning_content_fallback", new_reasoning)
                                             yield self._build_reasoning_chunk(
                                                 json_lib,
                                                 transformed,
@@ -750,9 +776,11 @@ class ChatCompletionService:
                                         new_thinking = self._diff_new_content(thinking_accumulator, thinking_part)
                                         if new_thinking:
                                             if not is_thinking_model:
+                                                _log_v_output("answer_thinking_content", new_thinking)
                                                 yield self._build_content_chunk(json_lib, transformed, request, new_thinking)
                                                 answer_accumulator += new_thinking
                                             else:
+                                                _log_v_output("answer_reasoning_content", new_thinking)
                                                 yield self._build_reasoning_chunk(json_lib, transformed, request, new_thinking)
                                             thinking_accumulator += new_thinking
                                     
@@ -760,6 +788,7 @@ class ChatCompletionService:
                                     if answer_part:
                                         new_answer = self._diff_new_content(answer_accumulator, answer_part)
                                         if new_answer:
+                                            _log_v_output("answer_content", new_answer)
                                             yield self._build_content_chunk(json_lib, transformed, request, new_answer)
                                             answer_accumulator += new_answer
                                 else:
@@ -768,6 +797,7 @@ class ChatCompletionService:
                                     if cleaned:
                                         new_answer = self._diff_new_content(answer_accumulator, cleaned)
                                         if new_answer:
+                                            _log_v_output("answer_plain_content", new_answer)
                                             yield self._build_content_chunk(json_lib, transformed, request, new_answer)
                                             answer_accumulator += new_answer
                                 continue
@@ -780,6 +810,7 @@ class ChatCompletionService:
                                     has_thinking = True
                                     yield self._build_role_chunk(json_lib, transformed, request)
                                 
+                                _log_v_output("delta_content", delta_content)
                                 yield self._build_content_chunk(json_lib, transformed, request, delta_content)
                                 answer_accumulator += delta_content
                             continue
@@ -834,32 +865,19 @@ class ChatCompletionService:
                                             answer_accumulator += markdown_images
                                     else:
                                         # 无图片的内容处理
-                                        # V 系列模型：当作思考内容处理
-                                        # thinking 系列模型：当作正文末尾补充
-                                        if is_vision_model:
-                                            # V 系列模型：思考内容
-                                            new_thinking = self._diff_new_content(thinking_accumulator, tail_text)
-                                            if new_thinking:
-                                                cleaned = self._clean_thinking(new_thinking)
-                                                if cleaned:
-                                                    if not is_thinking_model:
-                                                        yield self._build_content_chunk(json_lib, transformed, request, cleaned)
-                                                        answer_accumulator += cleaned
-                                                    else:
-                                                        yield self._build_reasoning_chunk(json_lib, transformed, request, cleaned)
-                                                    thinking_accumulator += new_thinking
-                                        else:
-                                            # thinking 系列模型：正文末尾补充
-                                            cleaned = self._clean_thinking(tail_text)
-                                            if cleaned:
-                                                new_answer = self._diff_new_content(answer_accumulator, cleaned)
-                                                if new_answer:
-                                                    yield self._build_content_chunk(json_lib, transformed, request, new_answer)
-                                                    answer_accumulator += new_answer
+                                        # phase="other" + has_edit_index 的内容是正文末尾的补充（如最后几个字）
+                                        # 不论是 V 系列还是 thinking 系列，都应输出到正文 content
+                                        # 注意：不使用 diff 计算，因为这些是纯增量内容，直接输出即可
+                                        cleaned = self._clean_thinking(tail_text)
+                                        if cleaned:
+                                            _log_v_output("other_tail_content", cleaned)
+                                            yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                            answer_accumulator += cleaned
 
 
                                 else:
                                     # 普通内容放入 content（正文）
+                                    _log_v_output("other_content", tail_text)
                                     yield self._build_content_chunk(json_lib, transformed, request, tail_text)
                             continue
 

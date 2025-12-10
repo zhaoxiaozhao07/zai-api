@@ -62,4 +62,4 @@ debug/
 
 *.json
 *.jsonl
-temp-response-store/
+temp-response-store/logs/

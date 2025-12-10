@@ -128,6 +128,78 @@ def debug_log(message: str, *args, **kwargs) -> None:
         _logger.debug(formatted_message, **kwargs)
 
 
+# V系列调试日志文件路径
+_V_SERIES_LOG_FILE = None
+
+
+def _get_v_series_log_file():
+    """获取V系列调试日志文件句柄（懒加载）"""
+    global _V_SERIES_LOG_FILE
+    if _V_SERIES_LOG_FILE is None:
+        from pathlib import Path
+        import os
+        
+        # 确保logs目录存在
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        
+        log_path = log_dir / "v_series_debug.log"
+        
+        # 以追加模式打开文件（如果想每次启动清空，改为 "w"）
+        _V_SERIES_LOG_FILE = open(log_path, "a", encoding="utf-8")
+        
+        # 写入启动分隔线
+        from datetime import datetime
+        _V_SERIES_LOG_FILE.write(f"\n{'='*80}\n")
+        _V_SERIES_LOG_FILE.write(f"V系列调试日志 - 启动时间: {datetime.now().isoformat()}\n")
+        _V_SERIES_LOG_FILE.write(f"{'='*80}\n\n")
+        _V_SERIES_LOG_FILE.flush()
+    
+    return _V_SERIES_LOG_FILE
+
+
+def v_series_debug_log(log_type: str, **kwargs) -> None:
+    """
+    V系列模型调试日志 - 写入文件（仅debug级别启用）
+    
+    Args:
+        log_type: 日志类型，如 "上游响应" 或 "输出响应"
+        **kwargs: 日志数据字段
+    """
+    if settings.LOG_LEVEL != "debug":
+        return
+    
+    from datetime import datetime
+    import json
+    
+    try:
+        log_file = _get_v_series_log_file()
+        
+        # 构建日志条目
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        log_entry = {
+            "timestamp": timestamp,
+            "type": log_type,
+            **kwargs
+        }
+        
+        # 写入文件
+        log_file.write(f"[{timestamp}] [{log_type}]\n")
+        for key, value in kwargs.items():
+            # 对于较长的内容，保留完整内容
+            if isinstance(value, str) and len(value) > 200:
+                log_file.write(f"  {key}:\n")
+                log_file.write(f"    {value}\n")
+            else:
+                log_file.write(f"  {key}: {value}\n")
+        log_file.write("\n")
+        log_file.flush()
+        
+    except Exception as e:
+        # 文件写入失败时，回退到控制台
+        _logger.warning(f"V系列调试日志写入失败: {e}")
+
+
 def request_stage_log(stage: str, message: str, **kwargs) -> None:
     """
     Log info-level request stage transitions without dumping payload data.
