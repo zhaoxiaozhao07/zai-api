@@ -450,9 +450,6 @@ class ZAITransformer:
                       requested_model == settings.GLM_45V_MODEL or  # glm4.5v 视觉模型也是 thinking 模型
                       requested_model == settings.GLM_46V_MODEL or  # glm4.6v 视觉模型也是 thinking 模型
                       request.get("reasoning", False))
-        is_search = (requested_model == settings.SEARCH_MODEL or
-                    requested_model == settings.GLM_46_SEARCH_MODEL)
-        is_advanced_search = (requested_model == settings.GLM_46_ADVANCED_SEARCH_MODEL)
         is_vision_model = (requested_model == settings.GLM_45V_MODEL or
                           requested_model == settings.GLM_46V_MODEL)
         is_glm47_model = (requested_model == settings.GLM_47_MODEL or
@@ -473,12 +470,6 @@ class ZAITransformer:
         if requested_model == settings.GLM_46V_MODEL:
             mcp_servers.extend(["vlm-image-search", "vlm-image-recognition", "vlm-image-processing"])
             debug_log(f"🔍 检测到 GLM-4.6V 模型，添加 VLM MCP 服务器")
-        if is_advanced_search:
-            mcp_servers.append("advanced-search")
-            debug_log(f"🔍 检测到高级搜索模型，添加 advanced-search MCP 服务器")
-        elif is_search:
-            mcp_servers.append("deep-web-search")
-            debug_log(f"🔍 检测到搜索模型，添加 deep-web-search MCP 服务器")
         
         # 构建隐藏的MCP服务器特性列表
         hidden_mcp_features = [
@@ -575,12 +566,12 @@ class ZAITransformer:
         else:
             features = {
                 "image_generation": False,
-                "web_search": is_search or is_advanced_search,
-                "auto_web_search": is_search or is_advanced_search,
+                "web_search": False,
+                "auto_web_search": False,
                 "preview_mode": True,
                 "flags": [],
                 "features": hidden_mcp_features,
-                "enable_thinking": is_thinking or is_search or is_advanced_search,
+                "enable_thinking": is_thinking,
             }
             background_tasks = {
                 "title_generation": False,

@@ -33,7 +33,6 @@ TEST_MESSAGES = [
 AVAILABLE_MODELS = [
     "glm-4.5",
     "glm-4.5-thinking",
-    "glm-4.5-search",
     "glm-4.5-air",
     "glm-4.6",
     "glm-4.6-thinking",

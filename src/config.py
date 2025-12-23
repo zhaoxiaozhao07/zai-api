@@ -141,13 +141,10 @@ class Settings(BaseSettings):
     # Model Configuration
     PRIMARY_MODEL: str = os.getenv("PRIMARY_MODEL", "GLM-4.5")
     THINKING_MODEL: str = os.getenv("THINKING_MODEL", "GLM-4.5-Thinking")
-    SEARCH_MODEL: str = os.getenv("SEARCH_MODEL", "GLM-4.5-Search")
     AIR_MODEL: str = os.getenv("AIR_MODEL", "GLM-4.5-Air")
     GLM_45V_MODEL: str = os.getenv("GLM_45V_MODEL", "GLM-4.5V")
     GLM_46_MODEL: str = os.getenv("GLM_46_MODEL", "GLM-4.6")
     GLM_46_THINKING_MODEL: str = os.getenv("GLM_46_THINKING_MODEL", "GLM-4.6-Thinking")
-    GLM_46_SEARCH_MODEL: str = os.getenv("GLM_46_SEARCH_MODEL", "GLM-4.6-Search")
-    GLM_46_ADVANCED_SEARCH_MODEL: str = os.getenv("GLM_46_ADVANCED_SEARCH_MODEL", "GLM-4.6-advanced-search")
     GLM_46V_MODEL: str = os.getenv("GLM_46V_MODEL", "GLM-4.6V")
     GLM_47_MODEL: str = os.getenv("GLM_47_MODEL", "GLM-4.7")
     GLM_47_THINKING_MODEL: str = os.getenv("GLM_47_THINKING_MODEL", "GLM-4.7-Thinking")
@@ -225,13 +222,10 @@ _init_fe_version()
 MODEL_MAPPING = {
     settings.PRIMARY_MODEL: "0727-360B-API",
     settings.THINKING_MODEL: "0727-360B-API",
-    settings.SEARCH_MODEL: "0727-360B-API",
     settings.AIR_MODEL: "0727-106B-API",
     settings.GLM_45V_MODEL: "glm-4.5v",
     settings.GLM_46_MODEL: "GLM-4-6-API-V1",
     settings.GLM_46_THINKING_MODEL: "GLM-4-6-API-V1",
-    settings.GLM_46_SEARCH_MODEL: "GLM-4-6-API-V1",
-    settings.GLM_46_ADVANCED_SEARCH_MODEL: "GLM-4-6-API-V1",
     settings.GLM_46V_MODEL: "glm-4.6v",
     settings.GLM_47_MODEL: "glm-4.7",
     settings.GLM_47_THINKING_MODEL: "glm-4.7",

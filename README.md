@@ -136,13 +136,10 @@ response = client.chat.completions.create(
 | `UVICORN_WORKERS`        | Uvicorn 工作进程数     | `4`                                      |
 | `PRIMARY_MODEL`          | 主模型名称            | `GLM-4.5`                                |
 | `THINKING_MODEL`         | 思考模型名称          | `GLM-4.5-Thinking`                       |
-| `SEARCH_MODEL`           | 搜索模型名称          | `GLM-4.5-Search`                         |
 | `AIR_MODEL`              | Air 模型名称          | `GLM-4.5-Air`                            |
 | `GLM_45V_MODEL`          | GLM-4.5V 视觉模型     | `GLM-4.5V`                               |
 | `GLM_46_MODEL`           | GLM-4.6 模型名称      | `GLM-4.6`                                |
 | `GLM_46_THINKING_MODEL`  | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
-| `GLM_46_SEARCH_MODEL`    | GLM-4.6 搜索模型      | `GLM-4.6-Search`                         |
-| `GLM_46_ADVANCED_SEARCH_MODEL` | GLM-4.6 高级模型     | `GLM-4.6-Advanced-Search`                |
 | `GLM_47_MODEL`           | GLM-4.7 旗舰模型（最新）| `GLM-4.7`                                |
 | `GLM_47_THINKING_MODEL`  | GLM-4.7 思考模型      | `GLM-4.7-Thinking`                       |
 | `DEBUG_LOGGING`          | 详细日志输出          | `true`                                   |
@@ -185,10 +182,8 @@ response = client.chat.completions.create(
 | GLM-4.7-Thinking | GLM-4-7-API    | 4.7 思考版本             |
 | GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本                 |
 | GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本             |
-| GLM-4.6-Search   | GLM-4-6-API-V1 | 4.6 搜索版本             |
 | GLM-4.5          | 0727-360B-API  | 主模型                   |
 | GLM-4.5-Thinking | 0727-360B-API  | 思考模型                 |
-| GLM-4.5-Search   | 0727-360B-API  | 搜索模型                 |
 | GLM-4.5-Air      | 0727-106B-API  | 轻量级模型               |
 | GLM-4.5V         | glm-4.5v       | 视觉模型                 |
 | GLM-4.6V         | glm-4.6v       | 视觉旗舰模型             |
