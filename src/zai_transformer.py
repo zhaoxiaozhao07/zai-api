@@ -474,6 +474,7 @@ class ZAITransformer:
         requested_model = request.get("model", settings.PRIMARY_MODEL)
         is_thinking = (requested_model == settings.THINKING_MODEL or
                       requested_model == settings.GLM_46_THINKING_MODEL or
+                      requested_model == settings.GLM_47_THINKING_MODEL or  # 只有 GLM-4.7-Thinking 启用 thinking
                       requested_model == settings.GLM_45V_MODEL or  # glm4.5v 视觉模型也是 thinking 模型
                       requested_model == settings.GLM_46V_MODEL or  # glm4.6v 视觉模型也是 thinking 模型
                       request.get("reasoning", False))
@@ -482,6 +483,8 @@ class ZAITransformer:
         is_advanced_search = (requested_model == settings.GLM_46_ADVANCED_SEARCH_MODEL)
         is_vision_model = (requested_model == settings.GLM_45V_MODEL or
                           requested_model == settings.GLM_46V_MODEL)
+        is_glm47_model = (requested_model == settings.GLM_47_MODEL or
+                          requested_model == settings.GLM_47_THINKING_MODEL)
 
         # 获取上游模型ID
         upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
@@ -581,6 +584,22 @@ class ZAITransformer:
                 "title_generation": True,
                 "tags_generation": True,
             }
+        elif is_glm47_model:
+            # GLM-4.7 系列采用简化格式，enable_thinking 根据具体模型决定
+            # glm-4.7: enable_thinking=False, glm-4.7-thinking: enable_thinking=True
+            glm47_enable_thinking = (requested_model == settings.GLM_47_THINKING_MODEL)
+            features = {
+                "image_generation": False,
+                "web_search": False,
+                "auto_web_search": False,
+                "preview_mode": True,
+                "flags": [],
+                "enable_thinking": glm47_enable_thinking,
+            }
+            background_tasks = {
+                "title_generation": True,
+                "tags_generation": True,
+            }
         else:
             features = {
                 "image_generation": False,
@@ -614,9 +633,13 @@ class ZAITransformer:
             "id": generate_uuid(),
         }
 
-        # 与抓包保持一致：GLM-4.5V 需要 current_user_message_id/parent_id，且不上送 model_item
+        # 与抓包保持一致：GLM-4.5V/4.6V/4.7 需要 current_user_message_id/parent_id，且不上送 model_item
         if is_vision_model:
             body["current_user_message_id"] = current_user_message_id
+            body["current_user_message_parent_id"] = None
+        elif is_glm47_model:
+            # GLM-4.7 使用简化格式：添加 current_user_message_id/parent_id 但不添加 model_item
+            body["current_user_message_id"] = generate_uuid()
             body["current_user_message_parent_id"] = None
         else:
             body["model_item"] = {

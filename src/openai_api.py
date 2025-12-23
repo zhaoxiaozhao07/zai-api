@@ -66,6 +66,8 @@ async def list_models():
             Model(id=settings.GLM_46_SEARCH_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46_ADVANCED_SEARCH_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=settings.GLM_46V_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=settings.GLM_47_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=settings.GLM_47_THINKING_MODEL, created=current_time, owned_by="z.ai"),
         ]
     )
     return response
