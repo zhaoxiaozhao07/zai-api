@@ -1,16 +1,19 @@
 """
 Toolify 提示词生成器
 生成工具调用的系统提示词
+
+更新自 Toolify_new 版本，添加参数校验和增强功能
 """
 
 import json
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
 
-def get_function_call_prompt_template(trigger_signal: str, custom_template: str = None) -> str:
+def get_function_call_prompt_template(trigger_signal: str, custom_template: Optional[str] = None) -> str:
     """
     基于动态触发信号生成提示词模板
     
@@ -97,7 +100,7 @@ def get_function_call_prompt_template(trigger_signal: str, custom_template: str 
 """
 
 
-def generate_function_prompt(tools: List[Dict[str, Any]], trigger_signal: str, custom_template: str = None) -> tuple[str, str]:
+def generate_function_prompt(tools: List[Dict[str, Any]], trigger_signal: str, custom_template: Optional[str] = None) -> tuple[str, str]:
     """
     基于客户端请求中的工具定义生成注入的系统提示词
     
@@ -108,6 +111,9 @@ def generate_function_prompt(tools: List[Dict[str, Any]], trigger_signal: str, c
         
     Returns:
         (prompt_content, trigger_signal): 提示词内容和触发信号
+        
+    Raises:
+        HTTPException: 如果工具定义校验失败（例如 required 字段引用了未定义的参数）
     """
     tools_list_str = []
     for i, tool in enumerate(tools):
@@ -115,10 +121,44 @@ def generate_function_prompt(tools: List[Dict[str, Any]], trigger_signal: str, c
         name = func.get("name", "")
         description = func.get("description", "")
 
-        # 读取 JSON Schema 字段
+        # 读取 JSON Schema 字段 + 基础类型校验
         schema: Dict[str, Any] = func.get("parameters", {}) or {}
-        props: Dict[str, Any] = schema.get("properties", {}) or {}
-        required_list: List[str] = schema.get("required", []) or []
+
+        props_raw = schema.get("properties", {})
+        if props_raw is None:
+            props_raw = {}
+        if not isinstance(props_raw, dict):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool '{name}': 'properties' must be an object, got {type(props_raw).__name__}"
+            )
+        props: Dict[str, Any] = props_raw
+
+        required_raw = schema.get("required", [])
+        if required_raw is None:
+            required_raw = []
+        if not isinstance(required_raw, list):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool '{name}': 'required' must be a list, got {type(required_raw).__name__}"
+            )
+
+        non_string_required = [k for k in required_raw if not isinstance(k, str)]
+        if non_string_required:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool '{name}': 'required' entries must be strings, got {non_string_required}"
+            )
+
+        required_list: List[str] = required_raw
+
+        # 验证 required 中的字段必须在 properties 中定义
+        missing_keys = [key for key in required_list if key not in props]
+        if missing_keys:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Tool '{name}': required parameters {missing_keys} are not defined in properties"
+            )
 
         # 简要摘要行：name (type)
         params_summary = ", ".join([
@@ -199,15 +239,19 @@ def generate_function_prompt(tools: List[Dict[str, Any]], trigger_signal: str, c
     return prompt_content, trigger_signal
 
 
-def safe_process_tool_choice(tool_choice) -> str:
+def safe_process_tool_choice(tool_choice, tools: Optional[List[Dict[str, Any]]] = None) -> str:
     """
     安全处理tool_choice字段，避免类型错误
     
     Args:
         tool_choice: tool_choice参数（可能是字符串或对象）
+        tools: 可用工具列表（用于验证）
         
     Returns:
         附加的提示词内容
+        
+    Raises:
+        HTTPException: 如果 tool_choice 指定的工具不在 tools 列表中
     """
     try:
         if tool_choice is None:
@@ -216,19 +260,61 @@ def safe_process_tool_choice(tool_choice) -> str:
         if isinstance(tool_choice, str):
             if tool_choice == "none":
                 return "\n\n**重要提示：** 本轮你被禁止使用任何工具。请像普通聊天助手一样响应，直接回答用户的问题。"
+            elif tool_choice == "auto":
+                # 默认行为，无额外约束
+                return ""
+            elif tool_choice == "required":
+                return "\n\n**重要提示：** 本轮你必须调用至少一个工具。不要在不使用工具的情况下响应。"
             else:
-                logger.debug(f"[TOOLIFY] 未知的tool_choice字符串值: {tool_choice}")
+                logger.warning(f"[TOOLIFY] 未知的tool_choice字符串值: {tool_choice}")
                 return ""
         
-        elif hasattr(tool_choice, 'function') and hasattr(tool_choice.function, 'name'):
-            required_tool_name = tool_choice.function.name
+        # 处理 ToolChoice 对象: {"type": "function", "function": {"name": "xxx"}}
+        elif hasattr(tool_choice, 'function'):
+            function_dict = tool_choice.function
+            if not isinstance(function_dict, dict):
+                raise HTTPException(status_code=400, detail="tool_choice.function must be an object")
+            
+            required_tool_name = function_dict.get("name")
+            if not required_tool_name or not isinstance(required_tool_name, str):
+                raise HTTPException(status_code=400, detail="tool_choice.function.name must be a non-empty string")
+            
+            # 验证指定的工具是否存在
+            if tools:
+                tool_names = [t.get("function", {}).get("name") for t in tools if isinstance(t, dict)]
+                if required_tool_name not in tool_names:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"tool_choice specifies tool '{required_tool_name}' which is not in the tools list. Available tools: {tool_names}"
+                    )
+            
             return f"\n\n**重要提示：** 本轮你必须**仅**使用名为 `{required_tool_name}` 的工具。生成必要的参数并按指定的XML格式输出。"
         
+        # 处理字典形式的 tool_choice
+        elif isinstance(tool_choice, dict):
+            function_info = tool_choice.get("function", {})
+            if isinstance(function_info, dict):
+                required_tool_name = function_info.get("name")
+                if required_tool_name and isinstance(required_tool_name, str):
+                    # 验证指定的工具是否存在
+                    if tools:
+                        tool_names = [t.get("function", {}).get("name") for t in tools if isinstance(t, dict)]
+                        if required_tool_name not in tool_names:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"tool_choice specifies tool '{required_tool_name}' which is not in the tools list. Available tools: {tool_names}"
+                            )
+                    return f"\n\n**重要提示：** 本轮你必须**仅**使用名为 `{required_tool_name}` 的工具。生成必要的参数并按指定的XML格式输出。"
+            logger.debug(f"[TOOLIFY] 无法解析tool_choice字典: {tool_choice}")
+            return ""
+        
         else:
-            logger.debug(f"[TOOLIFY] 不支持的tool_choice类型: {type(tool_choice)}")
+            logger.warning(f"[TOOLIFY] 不支持的tool_choice类型: {type(tool_choice)}")
             return ""
     
+    except HTTPException:
+        # 重新抛出 HTTPException 以保留状态码
+        raise
     except Exception as e:
         logger.error(f"[TOOLIFY] 处理tool_choice时出错: {e}")
         return ""
-

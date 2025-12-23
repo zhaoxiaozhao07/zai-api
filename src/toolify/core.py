@@ -165,8 +165,12 @@ class ToolifyCore:
             logger.debug(f"[TOOLIFY] 未找到工具调用映射，使用默认格式")
             return f"Tool execution result:\n<tool_result>\n{result_content}\n</tool_result>"
         
+        # 获取工具参数的JSON字符串
+        tool_arguments = json.dumps(tool_info.get('args', {}), ensure_ascii=False)
+        
         formatted_text = f"""Tool execution result:
 - Tool name: {tool_info['name']}
+- Tool arguments: {tool_arguments}
 - Execution result:
 <tool_result>
 {result_content}

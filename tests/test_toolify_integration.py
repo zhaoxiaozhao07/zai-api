@@ -1,3 +1,6 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 """
 测试 Toolify 工具调用功能集成
 """
@@ -73,7 +76,7 @@ def test_non_stream_with_tools():
     
     try:
         response = client.chat.completions.create(
-            model="GLM-4.5",
+            model="GLM-4.7",
             messages=[
                 {"role": "user", "content": "北京今天天气怎么样？"}
             ],
@@ -81,17 +84,17 @@ def test_non_stream_with_tools():
             tool_choice="auto"
         )
         
-        print(f"\n✅ 请求成功！")
+        print(f"\n 请求成功！")
         print(f"Finish reason: {response.choices[0].finish_reason}")
         
         if response.choices[0].message.tool_calls:
-            print(f"\n🔧 检测到 {len(response.choices[0].message.tool_calls)} 个工具调用:")
+            print(f"\n 检测到 {len(response.choices[0].message.tool_calls)} 个工具调用:")
             for tool_call in response.choices[0].message.tool_calls:
                 print(f"  - ID: {tool_call.id}")
                 print(f"  - 工具: {tool_call.function.name}")
                 print(f"  - 参数: {tool_call.function.arguments}")
         else:
-            print(f"\n📝 普通回复: {response.choices[0].message.content}")
+            print(f"\n 普通回复: {response.choices[0].message.content}")
         
         print(f"\n使用情况:")
         print(f"  - 输入 tokens: {response.usage.prompt_tokens}")
@@ -99,7 +102,7 @@ def test_non_stream_with_tools():
         print(f"  - 总计 tokens: {response.usage.total_tokens}")
         
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n 错误: {e}")
         import traceback
         traceback.print_exc()
 
@@ -117,7 +120,7 @@ def test_stream_with_tools():
     
     try:
         stream = client.chat.completions.create(
-            model="GLM-4.5",
+            model="GLM-4.7",
             messages=[
                 {"role": "user", "content": "帮我搜索Python教程"}
             ],
@@ -125,7 +128,7 @@ def test_stream_with_tools():
             stream=True
         )
         
-        print(f"\n✅ 开始接收流式响应...")
+        print(f"\n 开始接收流式响应...")
         has_tool_calls = False
         content_parts = []
         
@@ -139,19 +142,19 @@ def test_stream_with_tools():
                 
                 if delta.tool_calls:
                     has_tool_calls = True
-                    print(f"\n\n🔧 检测到工具调用:")
+                    print(f"\n\n 检测到工具调用:")
                     for tool_call in delta.tool_calls:
                         if tool_call.function:
                             print(f"  - 工具: {tool_call.function.name}")
                             print(f"  - 参数: {tool_call.function.arguments}")
         
         if not has_tool_calls and content_parts:
-            print(f"\n\n📝 完整内容: {''.join(content_parts)}")
+            print(f"\n\n 完整内容: {''.join(content_parts)}")
         
-        print(f"\n✅ 流式响应完成")
+        print(f"\n 流式响应完成")
         
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n 错误: {e}")
         import traceback
         traceback.print_exc()
 
@@ -169,18 +172,18 @@ def test_without_tools():
     
     try:
         response = client.chat.completions.create(
-            model="GLM-4.5",
+            model="GLM-4.7",
             messages=[
                 {"role": "user", "content": "你好，请介绍一下你自己"}
             ]
         )
         
-        print(f"\n✅ 请求成功！")
+        print(f"\n 请求成功！")
         print(f"Finish reason: {response.choices[0].finish_reason}")
         print(f"回复: {response.choices[0].message.content}")
         
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n 错误: {e}")
         import traceback
         traceback.print_exc()
 
@@ -198,7 +201,7 @@ def test_tool_choice_none():
     
     try:
         response = client.chat.completions.create(
-            model="GLM-4.5",
+            model="GLM-4.7",
             messages=[
                 {"role": "user", "content": "北京天气如何？"}
             ],
@@ -206,29 +209,29 @@ def test_tool_choice_none():
             tool_choice="none"  # 明确禁止使用工具
         )
         
-        print(f"\n✅ 请求成功！")
+        print(f"\n 请求成功！")
         print(f"Finish reason: {response.choices[0].finish_reason}")
         
         if response.choices[0].message.tool_calls:
-            print(f"❌ 错误：不应该有工具调用！")
+            print(f" 错误：不应该有工具调用！")
         else:
-            print(f"✅ 正确：没有工具调用")
+            print(f" 正确：没有工具调用")
             print(f"回复: {response.choices[0].message.content[:200]}...")
         
     except Exception as e:
-        print(f"\n❌ 错误: {e}")
+        print(f"\n 错误: {e}")
         import traceback
         traceback.print_exc()
 
 
 if __name__ == "__main__":
-    print("\n" + "🚀" * 30)
+    print("\n" + "-" * 30)
     print("Toolify 工具调用功能集成测试")
-    print("🚀" * 30)
-    print("\n⚠️  请确保服务器正在运行：python main.py")
-    print("⚠️  请确保 ENABLE_TOOLIFY=true 已设置")
+    print("-" * 30)
+    print("\n  请确保服务器正在运行：python main.py")
+    print("  请确保 ENABLE_TOOLIFY=true 已设置")
     
-    input("\n按 Enter 键开始测试...")
+    # input("\n按 Enter 键开始测试...")
     
     # 执行测试
     test_non_stream_with_tools()
@@ -237,6 +240,6 @@ if __name__ == "__main__":
     test_tool_choice_none()
     
     print("\n" + "=" * 60)
-    print("✅ 所有测试完成！")
+    print(" 所有测试完成！")
     print("=" * 60)
 

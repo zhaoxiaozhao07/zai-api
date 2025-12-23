@@ -67,9 +67,9 @@ def prepare_toolify_request(request_dict: Dict[str, Any], messages: List[Dict[st
         settings.TOOLIFY_CUSTOM_PROMPT
     )
     
-    # 处理 tool_choice
+    # 处理 tool_choice（传入 tools 以支持验证）
     tool_choice = request_dict.get("tool_choice")
-    tool_choice_prompt = safe_process_tool_choice(tool_choice)
+    tool_choice_prompt = safe_process_tool_choice(tool_choice, tools)
     if tool_choice_prompt:
         function_prompt += tool_choice_prompt
     
