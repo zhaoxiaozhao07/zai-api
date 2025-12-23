@@ -1,5 +1,5 @@
 """
-OpenAI API endpoints - 优化版本（集成 Toolify 工具调用功能）
+OpenAI API endpoints
 """
 
 import time
@@ -75,7 +75,7 @@ async def list_models():
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, authorization: str = Header(...)):
-    """Handle chat completion requests with ZAI transformer - 支持流式和非流式以及工具调用"""
+    """处理 chat completion 请求，支持流式和非流式"""
     role = request.messages[0].role if request.messages else "unknown"
     request_stage_log(
         "received",
@@ -110,8 +110,8 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             proxy=current_proxy or "direct",
         )
 
-        # 准备请求并转换（Service 内部处理 Toolify 等逻辑）
-        request_dict, request_dict_for_transform, enable_toolify = await service.prepare_request(request)
+        # 准备请求并转换
+        request_dict, request_dict_for_transform = await service.prepare_request(request)
         chat_id = request_dict_for_transform.get("chat_id")
         bind_request_context(
             request_id=chat_id,
@@ -125,7 +125,6 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             request_id=chat_id,
             upstream=current_upstream,
             proxy=current_proxy or "direct",
-            toolify_enabled=enable_toolify,
             mode="stream" if request.stream else "non_stream",
         )
 
@@ -152,7 +151,6 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                 result = await service.handle_non_stream_request(
                     request,
                     transformed,
-                    enable_toolify,
                     request_client,
                     current_proxy,
                     current_upstream,
@@ -181,7 +179,6 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     current_upstream,
                     request_dict_for_transform,
                     json_lib,
-                    enable_toolify,
                 ):
                                                     yield chunk
                 request_stage_log("stream_finished", "流式响应生成器完成")
