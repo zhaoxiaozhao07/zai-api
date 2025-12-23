@@ -20,22 +20,11 @@ UPSTREAM_STRATEGY=failover
 # 本地API的访问密钥（用于验证客户端请求）
 AUTH_TOKEN=sk-123456
 
-# Z.AI Token（可选配置，用于访问Z.AI API）
+# Z.AI Token（必须配置，用于访问Z.AI API）
 # 支持多个token，用逗号分隔，例如: token1,token2,token3
 # 也可以在当前目录创建tokens.txt文件，一行一个token
 # 系统会自动合并去重，并在请求失败时切换token
-# 如果不配置ZAI_TOKEN，系统将自动使用匿名Token模式
-ZAI_TOKEN=eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6Ijc0MzIzNzQ3LTVhMTAtNDQ3My05ZjhmLTk5YjI2OWUwZDA0ZCIsImVtYWlsIjoib3FjZ3lrNWFodUBkdWNrbWFpbC5zYnMifQ.SJSZxgX4saVleREBpWdV1JIRxd_tJ_6cv3EflJFy8KXTSBSzYXmfVz9RZF5cF78aI3TY54eAONEjYuGbmYNYZQ
-
-# 匿名Token配置（无需Z.AI账号，自动获取临时访客Token）
-# 启用后，当ZAI_TOKEN不可用时，自动获取匿名Token作为保底机制
-ENABLE_GUEST_TOKEN=true
-
-# 匿名Token缓存时间（分钟），建议30分钟以平衡性能和有效性
-GUEST_TOKEN_CACHE_MINUTES=30
-
-# Z.AI认证API端点（一般无需修改）
-ZAI_AUTH_ENDPOINT=https://chat.z.ai/api/v1/auths/
+ZAI_TOKEN=your_zai_token_here
 
 # 服务器配置
 LISTEN_PORT=8080
@@ -53,14 +42,6 @@ SKIP_AUTH_TOKEN=false
 
 # 请求配置
 MAX_RETRIES=3
-
-# Toolify 工具调用功能配置
-# 启用后，API将支持OpenAI兼容的function calling
-ENABLE_TOOLIFY=true
-
-# 自定义工具调用提示词模板（可选），如果不设置，将使用默认模板
-# 模板中必须包含 {tools_list} 和 {trigger_signal} 占位符
-# TOOLIFY_CUSTOM_PROMPT=
 
 # 代理配置（可选）
 # 支持单个代理或多个代理（用逗号分隔）

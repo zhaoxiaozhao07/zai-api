@@ -138,11 +138,6 @@ class Settings(BaseSettings):
     _env_fe_version: Optional[str] = os.getenv("ZAI_FE_VERSION", "prod-fe-1.0.108")
     ZAI_FE_VERSION: str = ""  # 稍后在模块级别初始化为自动获取的版本
     
-    # Anonymous Token Configuration - 匿名Token配置
-    ENABLE_GUEST_TOKEN: bool = os.getenv("ENABLE_GUEST_TOKEN", "true").lower() == "true"
-    GUEST_TOKEN_CACHE_MINUTES: int = int(os.getenv("GUEST_TOKEN_CACHE_MINUTES", "30"))
-    ZAI_AUTH_ENDPOINT: str = os.getenv("ZAI_AUTH_ENDPOINT", "https://chat.z.ai/api/v1/auths/")
-    
     # Model Configuration
     PRIMARY_MODEL: str = os.getenv("PRIMARY_MODEL", "GLM-4.5")
     THINKING_MODEL: str = os.getenv("THINKING_MODEL", "GLM-4.5-Thinking")

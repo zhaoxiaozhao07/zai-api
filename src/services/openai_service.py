@@ -840,7 +840,7 @@ class ChatCompletionService:
     async def _mark_token_success(self, transformed: dict) -> None:
         token_pool = await get_token_pool()
         current_token = transformed.get("token", "")
-        if current_token and not token_pool.is_anonymous_token(current_token):
+        if current_token:
             token_pool.mark_token_success(current_token)
 
     async def _handle_retryable_error(
@@ -859,51 +859,31 @@ class ChatCompletionService:
 
         token_pool = await get_token_pool()
         current_token = transformed.get("token", "")
-        is_anonymous = token_pool.is_anonymous_token(current_token)
 
-        if is_anonymous:
-            info_log(f"[ANONYMOUS] 检测到匿名Token错误 {status_code}，清理缓存并重新获取")
-            await self.transformer.clear_anonymous_token_cache()
-            await self.transformer.refresh_header_template()
-            await network_manager.cleanup_current_client(current_proxy)
-            new_client, new_proxy = await network_manager.get_request_client()
-            request_client = new_client
-            current_proxy = new_proxy
-
-            if network_manager.has_upstream_pool() and network_manager.upstream_strategy == "failover":
-                await network_manager.switch_upstream_on_failure()
-                info_log("[FAILOVER] 匿名Token错误，尝试切换上游地址")
-
-            current_upstream = await network_manager.get_next_upstream()
-            transformed = await self.transformer.transform_request_in(
-                request_dict_for_transform,
-                client=request_client,
-                upstream_url=current_upstream,
-            )
-            info_log("[OK] 已获取新的匿名Token并重新生成请求")
-        else:
+        # 标记Token失败并切换
+        if current_token:
             token_pool.mark_token_failure(current_token)
-            info_log(f"[CONFIG] 配置Token错误 {status_code}，切换Token")
+        info_log(f"[CONFIG] 配置Token错误 {status_code}，切换Token")
 
-            await self.transformer.switch_token()
-            await self.transformer.refresh_header_template()
+        await self.transformer.switch_token()
+        await self.transformer.refresh_header_template()
+        current_upstream = await network_manager.get_next_upstream()
+        transformed = await self.transformer.transform_request_in(
+            request_dict_for_transform,
+            client=request_client,
+            upstream_url=current_upstream,
+        )
+        info_log("[OK] 已切换到下一个配置Token")
+
+        if network_manager.has_upstream_pool() and network_manager.upstream_strategy == "failover":
+            await network_manager.switch_upstream_on_failure()
             current_upstream = await network_manager.get_next_upstream()
             transformed = await self.transformer.transform_request_in(
                 request_dict_for_transform,
                 client=request_client,
                 upstream_url=current_upstream,
             )
-            info_log("[OK] 已切换到下一个配置Token")
-
-            if network_manager.has_upstream_pool() and network_manager.upstream_strategy == "failover":
-                await network_manager.switch_upstream_on_failure()
-                current_upstream = await network_manager.get_next_upstream()
-                transformed = await self.transformer.transform_request_in(
-                    request_dict_for_transform,
-                    client=request_client,
-                    upstream_url=current_upstream,
-                )
-                info_log("[FAILOVER] Token错误，已切换上游")
+            info_log("[FAILOVER] Token错误，已切换上游")
 
         if status_code in [502, 503, 504]:
             if network_manager.has_proxy_pool() and network_manager.proxy_strategy == "failover":
@@ -923,7 +903,7 @@ class ChatCompletionService:
     async def mark_token_success_if_configured(self, transformed: dict) -> None:
         token_pool = await get_token_pool()
         current_token = transformed.get("token", "")
-        if current_token and not token_pool.is_anonymous_token(current_token):
+        if current_token:
             token_pool.mark_token_success(current_token)
 
     def _build_role_chunk(self, json_lib, transformed: dict, request: OpenAIRequest) -> str:
