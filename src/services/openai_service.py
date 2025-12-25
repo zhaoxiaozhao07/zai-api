@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from typing import AsyncIterator, Dict, Optional, Tuple
 
@@ -24,6 +25,8 @@ from ..config import settings
 from ..zai_transformer import ZAITransformer
 from ..token_pool import get_token_pool
 from .network_manager import network_manager
+from .response_parser import response_parser
+from .chunk_builder import chunk_builder
 
 
 class ChatCompletionService:
@@ -31,6 +34,9 @@ class ChatCompletionService:
 
     def __init__(self) -> None:
         self.transformer = ZAITransformer()
+        # 使用拆分后的解析器和构建器
+        self.parser = response_parser
+        self.chunk = chunk_builder
 
     async def prepare_request(self, request: OpenAIRequest) -> Tuple[dict, dict]:
         """准备请求数据。"""
@@ -215,10 +221,10 @@ class ChatCompletionService:
                         if phase == "tool_call":
                             if data.get("edit_index") is not None and edit_content:
                                 # 先检测是否有图片
-                                image_urls = self._extract_image_urls(edit_content)
+                                image_urls = self.parser.extract_image_urls(edit_content)
                                 if image_urls:
                                     # 有图片，转换为markdown格式放入 answer_content
-                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    markdown_images = self.parser.format_images_as_markdown(image_urls)
                                     if markdown_images:
                                         answer_content += "\n\n" + markdown_images + "\n\n"
                                 else:
@@ -229,7 +235,7 @@ class ChatCompletionService:
                         # thinking 阶段：清洗后累积 delta_content
                         if phase == "thinking":
                             if delta_content:
-                                cleaned = self._clean_thinking(delta_content)
+                                cleaned = self.parser.clean_thinking(delta_content)
                                 if cleaned:
                                     thinking_content += cleaned
                             continue
@@ -245,9 +251,9 @@ class ChatCompletionService:
                             # 带 edit_index 的 edit_content 是思考内容的完整版
                             if has_edit_index and edit_content:
                                 # 先提取图片 URL（如有）
-                                image_urls = self._extract_image_urls(edit_content)
+                                image_urls = self.parser.extract_image_urls(edit_content)
                                 if image_urls:
-                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    markdown_images = self.parser.format_images_as_markdown(image_urls)
                                     if markdown_images:
                                         answer_content += "\n\n" + markdown_images + "\n\n"
                                 
@@ -256,9 +262,9 @@ class ChatCompletionService:
                                     latest_full_edit = edit_content
                                 else:
                                     # 清洗并累积思考内容
-                                    cleaned = self._clean_thinking(edit_content)
+                                    cleaned = self.parser.clean_thinking(edit_content)
                                     if cleaned:
-                                        new_thinking = self._diff_new_content(thinking_content, cleaned)
+                                        new_thinking = self.parser.diff_new_content(thinking_content, cleaned)
                                         if new_thinking:
                                             thinking_content += new_thinking
                             
@@ -288,10 +294,10 @@ class ChatCompletionService:
                             if tail_text:
                                 if has_edit_index:
                                     # 带 edit_index 的内容：先检测是否有图片
-                                    image_urls = self._extract_image_urls(tail_text)
+                                    image_urls = self.parser.extract_image_urls(tail_text)
                                     if image_urls:
                                         # 有图片，转换为markdown格式放入 answer_content
-                                        markdown_images = self._format_images_as_markdown(image_urls)
+                                        markdown_images = self.parser.format_images_as_markdown(image_urls)
                                         if markdown_images:
                                             answer_content += "\n\n" + markdown_images + "\n\n"
                                     else:
@@ -307,7 +313,7 @@ class ChatCompletionService:
                     # 注意：latest_full_edit 中可能不包含 <details> 开头（例如只剩属性残片），
                     # 这里统一交给 _split_edit_content + _clean_thinking 做清洗，移除 true" duration="1" 等残留。
                     if latest_full_edit:
-                        thinking_part, answer_part = self._split_edit_content(latest_full_edit)
+                        thinking_part, answer_part = self.parser.split_edit_content(latest_full_edit)
                         if thinking_part:
                             thinking_content = thinking_part
                         if answer_part:
@@ -552,13 +558,13 @@ class ChatCompletionService:
                             
                             if not has_thinking:
                                 has_thinking = True
-                                yield self._build_role_chunk(json_lib, transformed, request)
+                                yield self.chunk.build_role_chunk(json_lib, transformed, request)
                             
                             error_message = f"\n\n[系统提示: {error_detail}]"
-                            yield self._build_content_chunk(json_lib, transformed, request, error_message)
+                            yield self.chunk.build_content_chunk(json_lib, transformed, request, error_message)
                             
                             if is_done:
-                                finish_chunk = self._build_finish_chunk(json_lib, transformed, request)
+                                finish_chunk = self.chunk.build_finish_chunk(json_lib, transformed, request)
                                 yield finish_chunk
                                 yield "data: [DONE]\n\n"
                                 await self._mark_token_success(transformed)
@@ -571,41 +577,40 @@ class ChatCompletionService:
                             if data.get("edit_index") is not None and edit_content:
                                 if not has_thinking:
                                     has_thinking = True
-                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                    yield self.chunk.build_role_chunk(json_lib, transformed, request)
                                 
                                 # 先检测是否有图片（包括 image_reference 工具返回的图片）
-                                image_urls = self._extract_image_urls(edit_content)
+                                image_urls = self.parser.extract_image_urls(edit_content)
                                 if image_urls:
                                     # 有图片，转换为markdown格式放入正文
-                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    markdown_images = self.parser.format_images_as_markdown(image_urls)
                                     if markdown_images:
-                                        yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
+                                        yield self.chunk.build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                         answer_accumulator += markdown_images
                                 
                                 # 检测是否包含 <glm_block> 标签
                                 # 如果包含，需要拆分：glm_block 前的内容是正文，glm_block 本身是工具调用
                                 if "<glm_block" in edit_content:
-                                    import re
                                     # 拆分 glm_block 前的内容（正文）和 glm_block 本身
                                     glm_block_match = re.search(r'<glm_block[^>]*>.*?</glm_block>', edit_content, re.DOTALL)
                                     if glm_block_match:
                                         # glm_block 前的内容是正文
                                         before_glm_block = edit_content[:glm_block_match.start()].strip()
                                         if before_glm_block:
-                                            new_answer = self._diff_new_content(answer_accumulator, before_glm_block)
+                                            new_answer = self.parser.diff_new_content(answer_accumulator, before_glm_block)
                                             if new_answer:
                                                 _log_v_output("tool_call_content", new_answer)
-                                                yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                                yield self.chunk.build_content_chunk(json_lib, transformed, request, new_answer)
                                                 answer_accumulator += new_answer
                                         # glm_block 本身不输出（工具调用细节）
                                 else:
                                     # 没有 glm_block，整个内容是正文的追加
-                                    cleaned = self._clean_thinking(edit_content)
+                                    cleaned = self.parser.clean_thinking(edit_content)
                                     if cleaned:
-                                        new_answer = self._diff_new_content(answer_accumulator, cleaned)
+                                        new_answer = self.parser.diff_new_content(answer_accumulator, cleaned)
                                         if new_answer:
                                             _log_v_output("tool_call_plain_content", new_answer)
-                                            yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                            yield self.chunk.build_content_chunk(json_lib, transformed, request, new_answer)
                                             answer_accumulator += new_answer
                             continue
 
@@ -615,24 +620,24 @@ class ChatCompletionService:
                             if delta_content:
                                 if not has_thinking:
                                     has_thinking = True
-                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                    yield self.chunk.build_role_chunk(json_lib, transformed, request)
                                 
                                 if not is_thinking_model:
-                                    cleaned = self._clean_thinking(delta_content)
+                                    cleaned = self.parser.clean_thinking(delta_content)
                                     if cleaned:
                                         _log_v_output("thinking_content", cleaned)
-                                        yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                        yield self.chunk.build_content_chunk(json_lib, transformed, request, cleaned)
                                         answer_accumulator += cleaned
 
                                 else:
                                     # thinking模型：流式输出 reasoning_content（使用增量 diff，防止覆盖式 delta 截断）
                                     # 先做"原样增量"：直接把本次 delta 里的新增部分先输出
-                                    raw_new = self._diff_new_content(thinking_accumulator, delta_content)
+                                    raw_new = self.parser.diff_new_content(thinking_accumulator, delta_content)
                                     if raw_new:
-                                        cleaned_raw = self._clean_thinking(raw_new)
+                                        cleaned_raw = self.parser.clean_thinking(raw_new)
                                         if cleaned_raw:
                                             _log_v_output("reasoning_content", cleaned_raw)
-                                            yield self._build_reasoning_chunk(
+                                            yield self.chunk.build_reasoning_chunk(
                                                 json_lib,
                                                 transformed,
                                                 request,
@@ -641,15 +646,15 @@ class ChatCompletionService:
                                             thinking_accumulator += raw_new
 
                                     # 再做一次基于清洗后的兜底增量，防止上游覆盖式 delta 导致遗漏
-                                    cleaned_full = self._clean_thinking(delta_content)
+                                    cleaned_full = self.parser.clean_thinking(delta_content)
                                     if cleaned_full:
-                                        new_reasoning = self._diff_new_content(
-                                            self._clean_thinking(thinking_accumulator),
+                                        new_reasoning = self.parser.diff_new_content(
+                                            self.parser.clean_thinking(thinking_accumulator),
                                             cleaned_full,
                                         )
                                         if new_reasoning:
                                             _log_v_output("reasoning_content_fallback", new_reasoning)
-                                            yield self._build_reasoning_chunk(
+                                            yield self.chunk.build_reasoning_chunk(
                                                 json_lib,
                                                 transformed,
                                                 request,
@@ -671,48 +676,48 @@ class ChatCompletionService:
                             if has_edit_index and edit_content:
                                 if not has_thinking:
                                     has_thinking = True
-                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                    yield self.chunk.build_role_chunk(json_lib, transformed, request)
                                 
                                 # 先提取图片 URL（如有）
-                                image_urls = self._extract_image_urls(edit_content)
+                                image_urls = self.parser.extract_image_urls(edit_content)
                                 if image_urls:
-                                    markdown_images = self._format_images_as_markdown(image_urls)
+                                    markdown_images = self.parser.format_images_as_markdown(image_urls)
                                     if markdown_images:
-                                        yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
+                                        yield self.chunk.build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                         answer_accumulator += markdown_images
                                 
                                 # 只有包含 </details> 标签时才拆分思考和正文（V 系列模型的多阶段思考）
                                 if "</details>" in edit_content:
-                                    thinking_part, answer_part = self._split_edit_content(edit_content)
+                                    thinking_part, answer_part = self.parser.split_edit_content(edit_content)
                                     
                                     # 处理思考部分
                                     if thinking_part:
-                                        new_thinking = self._diff_new_content(thinking_accumulator, thinking_part)
+                                        new_thinking = self.parser.diff_new_content(thinking_accumulator, thinking_part)
                                         if new_thinking:
                                             if not is_thinking_model:
                                                 _log_v_output("answer_thinking_content", new_thinking)
-                                                yield self._build_content_chunk(json_lib, transformed, request, new_thinking)
+                                                yield self.chunk.build_content_chunk(json_lib, transformed, request, new_thinking)
                                                 answer_accumulator += new_thinking
                                             else:
                                                 _log_v_output("answer_reasoning_content", new_thinking)
-                                                yield self._build_reasoning_chunk(json_lib, transformed, request, new_thinking)
+                                                yield self.chunk.build_reasoning_chunk(json_lib, transformed, request, new_thinking)
                                             thinking_accumulator += new_thinking
                                     
                                     # 处理正文部分
                                     if answer_part:
-                                        new_answer = self._diff_new_content(answer_accumulator, answer_part)
+                                        new_answer = self.parser.diff_new_content(answer_accumulator, answer_part)
                                         if new_answer:
                                             _log_v_output("answer_content", new_answer)
-                                            yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                            yield self.chunk.build_content_chunk(json_lib, transformed, request, new_answer)
                                             answer_accumulator += new_answer
                                 else:
                                     # 没有 details 标签，整个内容当作正文处理（thinking 系列模型）
-                                    cleaned = self._clean_thinking(edit_content)  # 清理可能的其他标签
+                                    cleaned = self.parser.clean_thinking(edit_content)  # 清理可能的其他标签
                                     if cleaned:
-                                        new_answer = self._diff_new_content(answer_accumulator, cleaned)
+                                        new_answer = self.parser.diff_new_content(answer_accumulator, cleaned)
                                         if new_answer:
                                             _log_v_output("answer_plain_content", new_answer)
-                                            yield self._build_content_chunk(json_lib, transformed, request, new_answer)
+                                            yield self.chunk.build_content_chunk(json_lib, transformed, request, new_answer)
                                             answer_accumulator += new_answer
                                 continue
 
@@ -722,10 +727,10 @@ class ChatCompletionService:
                             if delta_content:
                                 if not has_thinking:
                                     has_thinking = True
-                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                    yield self.chunk.build_role_chunk(json_lib, transformed, request)
                                 
                                 _log_v_output("delta_content", delta_content)
-                                yield self._build_content_chunk(json_lib, transformed, request, delta_content)
+                                yield self.chunk.build_content_chunk(json_lib, transformed, request, delta_content)
                                 answer_accumulator += delta_content
                             continue
 
@@ -752,33 +757,33 @@ class ChatCompletionService:
                             if tail_text:
                                 if not has_thinking:
                                     has_thinking = True
-                                    yield self._build_role_chunk(json_lib, transformed, request)
+                                    yield self.chunk.build_role_chunk(json_lib, transformed, request)
                                 
                                 if has_edit_index:
                                     # 带 edit_index 的内容：先检测是否有图片
-                                    image_urls = self._extract_image_urls(tail_text)
+                                    image_urls = self.parser.extract_image_urls(tail_text)
                                     if image_urls:
                                         # 有图片，转换为markdown格式放入正文
-                                        markdown_images = self._format_images_as_markdown(image_urls)
+                                        markdown_images = self.parser.format_images_as_markdown(image_urls)
                                         if markdown_images:
-                                            yield self._build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
+                                            yield self.chunk.build_content_chunk(json_lib, transformed, request, "\n\n" + markdown_images + "\n\n")
                                             answer_accumulator += markdown_images
                                     else:
                                         # 无图片的内容处理
                                         # phase="other" + has_edit_index 的内容是正文末尾的补充（如最后几个字）
                                         # 不论是 V 系列还是 thinking 系列，都应输出到正文 content
                                         # 注意：不使用 diff 计算，因为这些是纯增量内容，直接输出即可
-                                        cleaned = self._clean_thinking(tail_text)
+                                        cleaned = self.parser.clean_thinking(tail_text)
                                         if cleaned:
                                             _log_v_output("other_tail_content", cleaned)
-                                            yield self._build_content_chunk(json_lib, transformed, request, cleaned)
+                                            yield self.chunk.build_content_chunk(json_lib, transformed, request, cleaned)
                                             answer_accumulator += cleaned
 
 
                                 else:
                                     # 普通内容放入 content（正文）
                                     _log_v_output("other_content", tail_text)
-                                    yield self._build_content_chunk(json_lib, transformed, request, tail_text)
+                                    yield self.chunk.build_content_chunk(json_lib, transformed, request, tail_text)
                             continue
 
                         # 累积 usage 信息（用于最终输出）
@@ -788,11 +793,11 @@ class ChatCompletionService:
                         # 检查是否为 done 状态
                         if is_done:
                             # 1. 发送带 usage 的 finish chunk
-                            finish_chunk = self._build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
+                            finish_chunk = self.chunk.build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
                             yield finish_chunk
                             # 2. 如果有 usage 信息，发送独立的 usage chunk
                             if latest_usage:
-                                yield self._build_usage_chunk(json_lib, transformed, request, latest_usage)
+                                yield self.chunk.build_usage_chunk(json_lib, transformed, request, latest_usage)
                             # 3. 发送 [DONE]
                             yield "data: [DONE]\n\n"
                             await self._mark_token_success(transformed)
@@ -800,10 +805,10 @@ class ChatCompletionService:
                             return
 
                     # 流正常结束，发送 finish chunk 和 usage chunk
-                    finish_chunk = self._build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
+                    finish_chunk = self.chunk.build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
                     yield finish_chunk
                     if latest_usage:
-                        yield self._build_usage_chunk(json_lib, transformed, request, latest_usage)
+                        yield self.chunk.build_usage_chunk(json_lib, transformed, request, latest_usage)
                     yield "data: [DONE]\n\n"
 
                     await self._mark_token_success(transformed)
@@ -906,362 +911,8 @@ class ChatCompletionService:
         if current_token:
             token_pool.mark_token_success(current_token)
 
-    def _build_role_chunk(self, json_lib, transformed: dict, request: OpenAIRequest) -> str:
-        """构建角色初始化 chunk（第一个 SSE 块）"""
-        return f"data: {json_lib.dumps({
-            'id': 'chatcmpl-' + transformed['body']['chat_id'],
-            'object': 'chat.completion.chunk',
-            'created': int(time.time()),
-            'model': request.model,
-            'choices': [{
-                'index': 0,
-                'delta': {
-                    'role': 'assistant',
-                    'content': '',
-                    'reasoning_content': None,
-                    'tool_calls': None,
-                },
-                'logprobs': None,
-                'finish_reason': None,
-            }],
-            'usage': None,
-        })}\n\n"
-
-    def _build_content_chunk(
-        self,
-        json_lib,
-        transformed: dict,
-        request: OpenAIRequest,
-        content: str,
-    ) -> str:
-        """构建正文内容 chunk"""
-        return f"data: {json_lib.dumps({
-            'id': 'chatcmpl-' + transformed['body']['chat_id'],
-            'object': 'chat.completion.chunk',
-            'created': int(time.time()),
-            'model': request.model,
-            'choices': [{
-                'index': 0,
-                'delta': {
-                    'role': 'assistant',
-                    'content': content,
-                    'reasoning_content': None,
-                    'tool_calls': None,
-                },
-                'logprobs': None,
-                'finish_reason': None,
-            }],
-            'usage': None,
-        })}\n\n"
-
-    def _build_reasoning_chunk(
-        self,
-        json_lib,
-        transformed: dict,
-        request: OpenAIRequest,
-        reasoning_content: str,
-    ) -> str:
-        """构建包含 reasoning_content 的流式响应块（思考/推理内容）"""
-        return f"data: {json_lib.dumps({
-            'id': 'chatcmpl-' + transformed['body']['chat_id'],
-            'object': 'chat.completion.chunk',
-            'created': int(time.time()),
-            'model': request.model,
-            'choices': [{
-                'index': 0,
-                'delta': {
-                    'role': 'assistant',
-                    'content': None,
-                    'reasoning_content': reasoning_content,
-                    'tool_calls': None,
-                },
-                'logprobs': None,
-                'finish_reason': None,
-            }],
-            'usage': None,
-        })}\n\n"
-
-    def _build_usage_chunk(self, json_lib, transformed: dict, request: OpenAIRequest, usage) -> str:
-        """构建 usage 信息 chunk（携带 token 使用统计）"""
-        # 规范化 usage 结构，确保包含所有必需字段
-        normalized_usage = {
-            'prompt_tokens': usage.get('prompt_tokens', 0),
-            'completion_tokens': usage.get('completion_tokens', 0),
-            'total_tokens': usage.get('total_tokens', 0),
-            'prompt_tokens_details': usage.get('prompt_tokens_details', {}),
-            'completion_tokens_details': usage.get('completion_tokens_details', {
-                'reasoning_tokens': 0,
-                'accepted_prediction_tokens': 0,
-                'rejected_prediction_tokens': 0,
-            }),
-        }
-        return f"data: {json_lib.dumps({
-            'id': 'chatcmpl-' + transformed['body']['chat_id'],
-            'object': 'chat.completion.chunk',
-            'created': int(time.time()),
-            'model': request.model,
-            'choices': [],
-            'usage': normalized_usage,
-        })}\n\n"
-
-    def _build_finish_chunk(self, json_lib, transformed: dict, request: OpenAIRequest, usage: Optional[Dict] = None, finish_reason: str = 'stop') -> str:
-        """构建结束 chunk（包含 finish_reason 和可选的 usage）"""
-        # 如果有 usage 信息，构建完整的 usage 结构
-        chunk_usage = None
-        if usage:
-            chunk_usage = {
-                'prompt_tokens': usage.get('prompt_tokens', 0),
-                'total_tokens': usage.get('total_tokens', 0),
-                'completion_tokens': usage.get('completion_tokens', 0),
-                'estimated_cost': usage.get('estimated_cost'),
-                'prompt_tokens_details': usage.get('prompt_tokens_details', {
-                    'cached_tokens': 0,
-                    'cache_write_tokens': None,
-                }),
-            }
-        return f"data: {json_lib.dumps({
-            'id': 'chatcmpl-' + transformed['body']['chat_id'],
-            'object': 'chat.completion.chunk',
-            'created': int(time.time()),
-            'model': request.model,
-            'choices': [{
-                'index': 0,
-                'delta': {
-                    'role': 'assistant',
-                    'content': None,
-                    'reasoning_content': None,
-                    'tool_calls': None,
-                },
-                'logprobs': None,
-                'finish_reason': finish_reason,
-            }],
-            'usage': chunk_usage,
-        })}\n\n"
-
-    def _extract_search_info(self, reasoning_content: str, edit_content: str) -> str:
-        """从 edit_content 中提取搜索信息"""
-        if edit_content and "<glm_block" in edit_content and "search" in edit_content:
-            try:
-                import re
-                decoded = edit_content
-                try:
-                    decoded = edit_content.encode("utf-8").decode("unicode_escape").encode("latin1").decode("utf-8")
-                except Exception:
-                    try:
-                        import codecs
-                        decoded = codecs.decode(edit_content, "unicode_escape")
-                    except Exception:
-                        pass
-
-                queries_match = re.search(r'"queries":\s*\[(.*?)\]', decoded)
-                if queries_match:
-                    queries_str = queries_match.group(1)
-                    queries = re.findall(r'"([^"]+)"', queries_str)
-                    if queries:
-                        search_info = "🔍 **搜索：** " + "　".join(queries[:5])
-                        reasoning_content += f"\n\n{search_info}\n\n"
-                        debug_log("[搜索信息] 提取到搜索查询", queries=queries)
-            except Exception as exc:
-                debug_log("[搜索信息] 提取失败", error=str(exc))
-        return reasoning_content
-
-    def _extract_image_urls(self, content: str) -> list:
-        """从上游响应内容中提取图片URL
-        
-        处理格式示例：
-        1. {"image_url":{"url":"https://qc4n.bigmodel.cn/xxx.png?..."}}
-        2. {"img_url": "https://bigmodel-us3-prod-agent.cn-wlcb.ufileos.com/xxx.jpg", ...}
-        
-        Returns:
-            list: 提取到的图片URL列表
-        """
-        import re
-        
-        if not content:
-            return []
-        
-        image_urls = []
-        
-        # === 格式1: image_url 类型（bigmodel.cn 域名）===
-        # 匹配 "type":"image_url" 后面的 "url":"xxx" 模式
-        if '"type\\":\\"image_url\\"' in content or '"type":"image_url"' in content:
-            # 模式1：转义JSON格式 \"url\":\"xxx\"
-            pattern1 = r'\"url\":\s*\"(https?://[^\"\\]+(?:\\.[^\"\\]+)*[^\"\\]*)\"'
-            # 模式2：普通JSON格式 "url":"xxx"
-            pattern2 = r'"url":\s*"(https?://[^"]+)"'
-            
-            matches = re.findall(pattern1, content)
-            for url in matches:
-                clean_url = url.replace('\\/', '/').replace('\\"', '"')
-                if clean_url and 'bigmodel.cn' in clean_url:
-                    image_urls.append(clean_url)
-            
-            if not image_urls:
-                matches = re.findall(pattern2, content)
-                for url in matches:
-                    if url and 'bigmodel.cn' in url:
-                        image_urls.append(url)
-        
-        # === 格式2: img_url 类型（ufileos.com 域名，image_reference 工具调用）===
-        # 匹配 "img_url": "https://xxx.ufileos.com/xxx.jpg" 模式
-        if 'img_url' in content or 'image_reference' in content:
-            # 转义JSON格式: \"img_url\": \"xxx\"
-            pattern_img = r'\\\"img_url\\\":\s*\\\"(https?://[^\\\"]+)\\\"'
-            matches = re.findall(pattern_img, content)
-            for url in matches:
-                clean_url = url.replace('\\/', '/')
-                if clean_url and ('ufileos.com' in clean_url or 'bigmodel' in clean_url):
-                    image_urls.append(clean_url)
-            
-            # 普通JSON格式: "img_url": "xxx"
-            if not image_urls:
-                pattern_img2 = r'"img_url":\s*"(https?://[^"]+)"'
-                matches = re.findall(pattern_img2, content)
-                for url in matches:
-                    if url and ('ufileos.com' in url or 'bigmodel' in url):
-                        image_urls.append(url)
-        
-        return image_urls
-
-    def _format_images_as_markdown(self, image_urls: list) -> str:
-        """将图片URL列表格式化为markdown图片格式
-        
-        Args:
-            image_urls: 图片URL列表
-            
-        Returns:
-            str: markdown格式的图片字符串
-        """
-        if not image_urls:
-            return ""
-        
-        markdown_images = []
-        for i, url in enumerate(image_urls, 1):
-            # 生成markdown图片格式
-            markdown_images.append(f"![图片{i}]({url})")
-        
-        return "\n\n".join(markdown_images)
-
-    def _clean_thinking(self, delta_content: str) -> str:
-        """清理 thinking 内容，提取纯文本
-        
-        处理格式：
-        - 移除 <details> 和 <summary> 标签
-        - 移除 markdown 引用符号 "> "
-        - 保留纯文本内容
-        """
-        import re
-        
-        if not delta_content:
-            return ""
-        
-        # 0. 先丢弃可能出现在 <details> 之前的属性残片，如：true" duration="2" view="" last_tool_call_name="">
-        #   这类内容通常出现在 edit_content 开头，但并不是思考正文的一部分
-        #   策略：如果首行包含 duration= 或 last_tool_call_name 等字段，且以 "> 或 "> 结尾，则视为属性串，丢弃整行
-        first_newline = delta_content.find("\n")
-        if first_newline != -1:
-            first_line = delta_content[:first_newline].strip()
-            # 如果这一行包含典型的 <details> 属性字段，且以 > 或 "> 结尾，判定为属性残片
-            if re.search(r'(duration=|last_tool_call_name|view=)', first_line) and re.search(r'[">]$', first_line):
-                delta_content = delta_content[first_newline + 1 :]
-
-        # 1. 移除 <glm_block>...</glm_block> 工具调用块（整个块内容不展示给用户）
-        delta_content = re.sub(r'<glm_block[^>]*>.*?</glm_block>', '', delta_content, flags=re.DOTALL)
-        
-        # 2. 移除 <url>...</url> 标签（图片链接已在别处通过 _extract_image_urls 处理）
-        delta_content = re.sub(r'<url>[^<]*</url>', '', delta_content)
-
-        # 3. 移除 <details> 开始标签（包括所有属性）
-        delta_content = re.sub(r'<details[^>]*>', '', delta_content)
-        
-        # 4. 移除 </details> 结束标签
-        delta_content = re.sub(r'</details>', '', delta_content)
-
-        
-        # 5. 移除 <summary> 标签及其内容（如 "Thinking..." 或 "Thought for X seconds"）
-        delta_content = re.sub(r'<summary[^>]*>.*?</summary>', '', delta_content, flags=re.DOTALL)
-        
-        # 6. 移除行首的引用标记 "> "（markdown 格式）
-        delta_content = re.sub(r'^>\s*', '', delta_content, flags=re.MULTILINE)
-        delta_content = re.sub(r'\n>\s*', '\n', delta_content)
-        
-        # 7. 移除多余的空行（3个及以上连续换行符）
-        delta_content = re.sub(r'\n{3,}', '\n\n', delta_content)
-        
-        # 8. 去除首尾空白
-        return delta_content.strip()
-
-
-    def _split_edit_content(self, edit_content: str) -> Tuple[str, str]:
-        """拆分 edit_content，返回 (thinking_part, answer_part)
-        
-        处理格式：
-        <details type="reasoning" done="false/true" ...>
-        <summary>Thinking...</summary>
-        > 思考内容
-        </details>
-        回答内容
-        """
-        if not edit_content:
-            return "", ""
-
-        thinking_part = ""
-        answer_part = ""
-
-        # 查找 </details> 标签位置
-        if "</details>" in edit_content:
-            # 分割 thinking 和 answer 部分
-            parts = edit_content.split("</details>", 1)
-            thinking_part = parts[0] + "</details>"  # 保留完整的 details 标签用于清理
-            answer_part = parts[1] if len(parts) > 1 else ""
-        else:
-            # 没有 details 标签，整个内容当作答案
-            answer_part = edit_content
-
-        # 清理 thinking 内容（移除标签，保留纯文本）
-        if thinking_part:
-            thinking_part = self._clean_thinking(thinking_part)
-        
-        # 清理 answer 内容（移除可能的标签）
-        answer_part = answer_part.strip()
-        if answer_part:
-            # 移除开头的换行符
-            answer_part = answer_part.lstrip('\n')
-            # 移除可能包含的 think 标签
-            answer_part = answer_part.replace("<think>", "").replace("</think>", "")
-        
-        return thinking_part, answer_part
-
-    def _diff_new_content(self, existing: str, incoming: str) -> str:
-        """计算 incoming 相比 existing 的新增部分（用于流式增量输出）"""
-        incoming = incoming or ""
-        if not incoming:
-            return ""
-
-        existing = existing or ""
-        if not existing:
-            return incoming
-
-        if incoming == existing:
-            return ""
-
-        # 如果 incoming 是 existing 的扩展，返回新增部分
-        if incoming.startswith(existing):
-            return incoming[len(existing):]
-
-        # 寻找最长公共前缀以计算增量
-        max_overlap = min(len(existing), len(incoming))
-        for overlap in range(max_overlap, 0, -1):
-            if existing[-overlap:] == incoming[:overlap]:
-                return incoming[overlap:]
-
-        # 如果 existing 完全包含在 incoming 中
-        if existing in incoming:
-            return incoming.replace(existing, "", 1)
-
-        # 无法确定增量，返回完整内容
-        return incoming
 
 
 chat_completion_service = ChatCompletionService()
+
 

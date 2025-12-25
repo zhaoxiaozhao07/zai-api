@@ -9,7 +9,6 @@ import os
 import asyncio
 import random
 import time
-import threading
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -36,63 +35,42 @@ class TokenStatus:
         return self.successful_requests / self.total_requests
 
 
-def get_zai_dynamic_headers(chat_id: str = "") -> Dict[str, str]:
-    """
-    生成 Z.AI 特定的动态浏览器 headers
-    使用 browserforge 生成真实的浏览器指纹
-    
-    Args:
-        chat_id: 聊天 ID，用于生成正确的 Referer
-        
-    Returns:
-        Dict[str, str]: 包含 Z.AI 特定配置的 headers
-    """
-    try:
-        from browserforge.headers import HeaderGenerator
-        
-        # 使用 browserforge 生成真实的浏览器headers
-        generator = HeaderGenerator()
-        base_headers = generator.generate()
-        
-        # 提取关键信息
-        user_agent = base_headers.get("user-agent", "")
-        sec_ch_ua = base_headers.get("sec-ch-ua", "")
-        
-    except Exception as e:
-        debug_log(f"[WARN] browserforge生成headers失败，使用备用方案: {e}")
-        # 备用方案：使用简单的Chrome UA
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36"
-        sec_ch_ua = '"Not_A Brand";v="8", "Chromium";v="139", "Google Chrome";v="139"'
-    
-    # Z.AI 特定的 headers
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json, text/event-stream",
-        "Connection": "keep-alive",
-        "Cache-Control": "no-cache",
-        "User-Agent": user_agent,
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "X-FE-Version": settings.ZAI_FE_VERSION,
-        "Origin": "https://chat.z.ai",
-    }
-    
-    # 添加浏览器特定的 sec-ch-ua headers
-    if sec_ch_ua:
-        headers["sec-ch-ua"] = sec_ch_ua
-        headers["sec-ch-ua-mobile"] = "?0"
-        headers["sec-ch-ua-platform"] = '"Windows"'
-    
-    # 根据 chat_id 设置 Referer
-    if chat_id:
-        headers["Referer"] = f"https://chat.z.ai/c/{chat_id}"
-    else:
-        headers["Referer"] = "https://chat.z.ai/"
-    
-    return headers
-
-
 class TokenPool:
     """Token池管理类 - 管理配置Token的轮询和状态跟踪"""
+    
+    # 类级别单例状态（封装全局变量）
+    _instance: Optional['TokenPool'] = None
+    _instance_lock: Optional[asyncio.Lock] = None  # 延迟初始化
+    
+    @classmethod
+    def _get_lock(cls) -> asyncio.Lock:
+        """获取实例锁（延迟初始化，避免模块导入时的事件循环问题）"""
+        if cls._instance_lock is None:
+            cls._instance_lock = asyncio.Lock()
+        return cls._instance_lock
+    
+    @classmethod
+    async def get_instance(cls) -> 'TokenPool':
+        """
+        获取全局 TokenPool 实例（异步线程安全的单例模式）
+        
+        封装了原来的全局变量 `_token_pool_instance` 和 `_token_pool_lock`
+        
+        Returns:
+            TokenPool: 全局唯一的 TokenPool 实例
+        """
+        if cls._instance is None:
+            async with cls._get_lock():
+                # 双重检查锁定，防止并发创建多个实例
+                if cls._instance is None:
+                    cls._instance = cls()
+        return cls._instance
+    
+    @classmethod
+    async def reset_instance(cls):
+        """重置单例实例（用于测试）"""
+        async with cls._get_lock():
+            cls._instance = None
 
     def __init__(self):
         """初始化Token池"""
@@ -107,7 +85,7 @@ class TokenPool:
         self.token_statuses: Dict[str, TokenStatus] = {}
         self.failure_threshold: int = 3  # 失败 3 次后禁用
         self._in_fallback: bool = False  # 降级模式标志
-        self._status_lock = threading.Lock()  # 状态修改锁（同步锁，用于非异步方法）
+        # 注意：移除了 threading.Lock，依赖 Python GIL 保证单个字段赋值的原子性
 
         self._load_tokens()
     
@@ -243,34 +221,35 @@ class TokenPool:
         Args:
             token: 成功的 Token
         """
-        if token in self.token_statuses:
-            with self._status_lock:
-                status = self.token_statuses[token]
-                status.total_requests += 1
-                status.successful_requests += 1
-                status.failure_count = 0
-                status.last_failure_time = 0.0  # 重置失败时间
+        if token not in self.token_statuses:
+            return
+            
+        status = self.token_statuses[token]
+        status.total_requests += 1
+        status.successful_requests += 1
+        status.failure_count = 0
+        status.last_failure_time = 0.0  # 重置失败时间
 
-                # 如果之前被禁用，现在恢复
-                was_disabled = not status.is_available
-                if was_disabled:
-                    status.is_available = True
+        # 如果之前被禁用，现在恢复
+        was_disabled = not status.is_available
+        if was_disabled:
+            status.is_available = True
 
-                # 退出降级模式
-                was_in_fallback = self._in_fallback
-                if was_disabled and was_in_fallback:
-                    self._in_fallback = False
+        # 退出降级模式
+        was_in_fallback = self._in_fallback
+        if was_disabled and was_in_fallback:
+            self._in_fallback = False
 
-            # 日志输出在锁外，避免阻塞
-            if was_disabled:
-                info_log(f"[RECOVER] Token恢复可用: {token[:20]}...")
-                if was_in_fallback:
-                    info_log("[RECOVERY] 配置Token已恢复，退出降级模式")
-            else:
-                debug_log(
-                    f"[TOKEN] 成功 (成功率: {status.success_rate:.1%}, "
-                    f"总请求: {status.total_requests})"
-                )
+        # 日志输出
+        if was_disabled:
+            info_log(f"[RECOVER] Token恢复可用: {token[:20]}...")
+            if was_in_fallback:
+                info_log("[RECOVERY] 配置Token已恢复，退出降级模式")
+        else:
+            debug_log(
+                f"[TOKEN] 成功 (成功率: {status.success_rate:.1%}, "
+                f"总请求: {status.total_requests})"
+            )
 
     def mark_token_failure(self, token: str):
         """
@@ -279,32 +258,30 @@ class TokenPool:
         Args:
             token: 失败的 Token
         """
-        if token in self.token_statuses:
-            with self._status_lock:
-                status = self.token_statuses[token]
-                status.total_requests += 1
-                status.failure_count += 1
-                status.last_failure_time = time.time()
+        if token not in self.token_statuses:
+            return
+            
+        status = self.token_statuses[token]
+        status.total_requests += 1
+        status.failure_count += 1
+        status.last_failure_time = time.time()
 
-                # 失败次数达到阈值，禁用 Token
-                should_disable = status.failure_count >= self.failure_threshold
-                if should_disable:
-                    status.is_available = False
+        # 失败次数达到阈值，禁用 Token
+        should_disable = status.failure_count >= self.failure_threshold
+        if should_disable:
+            status.is_available = False
 
-                failure_count = status.failure_count
-                success_rate = status.success_rate
-
-            # 日志输出在锁外，避免阻塞
-            if should_disable:
-                error_log(
-                    f"[DISABLE] Token 已禁用: {token[:20]}... "
-                    f"(连续失败 {failure_count} 次)"
-                )
-            else:
-                info_log(
-                    f"[TOKEN] 失败 (失败计数: {failure_count}/{self.failure_threshold}, "
-                    f"成功率: {success_rate:.1%})"
-                )
+        # 日志输出
+        if should_disable:
+            error_log(
+                f"[DISABLE] Token 已禁用: {token[:20]}... "
+                f"(连续失败 {status.failure_count} 次)"
+            )
+        else:
+            info_log(
+                f"[TOKEN] 失败 (失败计数: {status.failure_count}/{self.failure_threshold}, "
+                f"成功率: {status.success_rate:.1%})"
+            )
 
     def try_recover_tokens(self):
         """
@@ -321,19 +298,18 @@ class TokenPool:
         recovery_interval = 1800  # 30 分钟
         recovered_tokens = []
 
-        with self._status_lock:
-            for status in self.token_statuses.values():
-                if (not status.is_available and
-                    current_time - status.last_failure_time > recovery_interval):
-                    status.is_available = True
-                    status.failure_count = 0
-                    recovered_tokens.append(status.token)
+        for status in self.token_statuses.values():
+            if (not status.is_available and
+                current_time - status.last_failure_time > recovery_interval):
+                status.is_available = True
+                status.failure_count = 0
+                recovered_tokens.append(status.token)
 
-            # 如果恢复了至少一个 Token，退出降级模式
-            if recovered_tokens:
-                self._in_fallback = False
+        # 如果恢复了至少一个 Token，退出降级模式
+        if recovered_tokens:
+            self._in_fallback = False
 
-        # 日志输出在锁外，避免阻塞
+        # 日志输出
         if recovered_tokens:
             for token in recovered_tokens:
                 info_log(f"[RECOVER] Token 已恢复: {token[:20]}...")
@@ -363,18 +339,11 @@ class TokenPool:
         async with self._switch_lock:  # 重新加载时也需要异步锁
             self._load_tokens()
 
-
-# 全局token池实例（单例模式）
-_token_pool_instance: Optional[TokenPool] = None
-_token_pool_lock = asyncio.Lock()
-
-
+# 保留兼容性的全局函数（内部调用类方法）
 async def get_token_pool() -> TokenPool:
-    """获取全局token池实例（异步线程安全的单例模式）"""
-    global _token_pool_instance
-    if _token_pool_instance is None:
-        async with _token_pool_lock:
-            # 双重检查锁定，防止并发创建多个实例
-            if _token_pool_instance is None:
-                _token_pool_instance = TokenPool()
-    return _token_pool_instance
+    """
+    获取全局 token 池实例（异步线程安全的单例模式）
+    
+    注意：这是为了向后兼容保留的函数，内部调用 TokenPool.get_instance()
+    """
+    return await TokenPool.get_instance()

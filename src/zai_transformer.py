@@ -11,7 +11,6 @@ import random
 from typing import Dict, Any, Tuple, List, Optional
 from functools import lru_cache
 from fastuuid import uuid4
-from furl import furl
 from dateutil import tz
 from datetime import datetime
 from browserforge.headers import HeaderGenerator
@@ -22,6 +21,8 @@ from .helpers import error_log, info_log, debug_log, perf_timer, perf_track
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
 from .image_handler import process_image_content
+from .header_manager import header_manager
+from .message_processor import message_processor
 
 
 # 全局 HeaderGenerator 实例（单例模式）
@@ -195,7 +196,7 @@ def build_query_params(
     chat_id: str = "",
     user_id: str = ""
 ) -> Dict[str, str]:
-    """构建查询参数，模拟真实的浏览器请求（使用furl优化URL处理）"""
+    """构建查询参数，模拟真实的浏览器请求"""
     if not user_id:
         try:
             payload = decode_jwt_payload(token)
@@ -203,12 +204,12 @@ def build_query_params(
         except Exception:
             user_id = "guest-user-" + str(abs(hash(token)) % 1000000)
     
-    # 使用furl构建URL（更优雅的URL处理）
+    # 使用原生字符串构建 URL（性能优化，替代 furl 库）
     if chat_id:
-        url = furl("https://chat.z.ai").add(path=["c", chat_id])
+        current_url = f"https://chat.z.ai/c/{chat_id}"
         pathname = f"/c/{chat_id}"
     else:
-        url = furl("https://chat.z.ai")
+        current_url = "https://chat.z.ai/"
         pathname = "/"
     
     # 构建完整的查询参数，包括浏览器指纹信息
@@ -232,7 +233,7 @@ def build_query_params(
         "viewport_size": "1038x654",
         "color_depth": "24",
         "pixel_ratio": "1.25",
-        "current_url": str(url),
+        "current_url": current_url,
         "pathname": pathname,
         "search": "",
         "hash": "",
@@ -350,10 +351,13 @@ class ZAITransformer:
         image_urls = []
         
         for idx, orig_msg in enumerate(messages):
-            msg = orig_msg.copy()
+            # 惰性拷贝：仅在需要修改时才拷贝
+            msg = orig_msg
+            needs_copy = False
 
             # 处理system角色转换
-            if msg.get("role") == "system":
+            if orig_msg.get("role") == "system":
+                msg = orig_msg.copy()
                 msg["role"] = "user"
                 content = msg.get("content")
 
@@ -365,10 +369,11 @@ class ZAITransformer:
                     msg["content"] = f"This is a system command, you must enforce compliance.{content}"
 
             # 处理user角色的图片内容
-            elif msg.get("role") == "user":
-                content = msg.get("content")
+            elif orig_msg.get("role") == "user":
+                content = orig_msg.get("content")
                 if isinstance(content, list):
                     new_content = []
+                    has_changes = False
                     for part_idx, part in enumerate(content):
                         if (
                             part.get("type") == "image_url"
@@ -378,6 +383,7 @@ class ZAITransformer:
                             image_url = part["image_url"]["url"]
                             debug_log(f"    消息[{idx}]内容[{part_idx}]: 检测到图片URL")
                             image_urls.append(image_url)
+                            has_changes = True
                             
                             # 视觉模型：保留图片在消息中，但会在上传后修改URL格式
                             if is_vision_model:
@@ -386,13 +392,16 @@ class ZAITransformer:
                         elif part.get("type") == "text":
                             new_content.append(part)
                     
-                    # 如果new_content只有文本，提取为字符串
-                    if len(new_content) == 1 and new_content[0].get("type") == "text":
-                        msg["content"] = new_content[0].get("text", "")
-                    elif new_content:
-                        msg["content"] = new_content
-                    else:
-                        msg["content"] = ""
+                    # 仅在有改动时才拷贝并更新消息
+                    if has_changes:
+                        msg = orig_msg.copy()
+                        # 如果new_content只有文本，提取为字符串
+                        if len(new_content) == 1 and new_content[0].get("type") == "text":
+                            msg["content"] = new_content[0].get("text", "")
+                        elif new_content:
+                            msg["content"] = new_content
+                        else:
+                            msg["content"] = ""
 
             processed_messages.append(msg)
         
@@ -627,14 +636,14 @@ class ZAITransformer:
         
         # 提取最后一条用户消息内容（用于签名和请求体）
         with perf_timer("extract_user_content", threshold_ms=5):
-            user_content = self._extract_last_user_content(messages)
+            user_content = message_processor.extract_last_user_content(messages)
         
         # 将用户内容添加到请求体中（新要求）
         body["signature_prompt"] = user_content
         
         # 使用缓存的header模板生成headers（性能优化）
         with perf_timer("generate_headers", threshold_ms=5):
-            dynamic_headers = await get_dynamic_headers(chat_id)
+            dynamic_headers = await header_manager.get_dynamic_headers(chat_id)
         
         # 从生成的headers中提取User-Agent
         user_agent = dynamic_headers.get("User-Agent", "")
@@ -648,7 +657,7 @@ class ZAITransformer:
             debug_log(f"解码JWT token获取user_id失败: {e}")
             user_id = "guest-user-" + str(abs(hash(token)) % 1000000)
         
-        query_params = build_query_params(timestamp, request_id, token, user_agent, chat_id, user_id)
+        query_params = header_manager.build_query_params(timestamp, request_id, token, user_agent, chat_id, user_id)
         
         # 生成Z.AI签名
         try:
