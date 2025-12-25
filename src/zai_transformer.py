@@ -13,7 +13,6 @@ from functools import lru_cache
 from fastuuid import uuid4
 from dateutil import tz
 from datetime import datetime
-from browserforge.headers import HeaderGenerator
 from fastapi import HTTPException
 
 from .config import settings, MODEL_MAPPING
@@ -23,13 +22,6 @@ from .token_pool import get_token_pool
 from .image_handler import process_image_content
 from .header_manager import header_manager
 from .message_processor import message_processor
-
-
-# 全局 HeaderGenerator 实例（单例模式）
-_header_generator_instance = None
-
-# 缓存的时区对象（避免重复查找）
-_cached_timezone = None
 
 
 @lru_cache(maxsize=8)
@@ -72,188 +64,9 @@ def generate_time_variables(timezone_name: str = "Asia/Shanghai") -> Dict[str, s
     }
 
 
-def get_header_generator_instance() -> HeaderGenerator:
-    """获取或创建 HeaderGenerator 实例（单例模式）"""
-    global _header_generator_instance
-    if _header_generator_instance is None:
-        # 配置HeaderGenerator：优先Chrome和Edge浏览器，Windows平台，桌面设备
-        _header_generator_instance = HeaderGenerator(
-            browser=('chrome', 'edge'),
-            os='windows',
-            device='desktop',
-            locale=('zh-CN', 'en-US'),
-            http_version=2
-        )
-    return _header_generator_instance
-
-
 def generate_uuid() -> str:
     """生成UUID v4（使用fastuuid提升性能）"""
     return str(uuid4())
-
-
-# Header模板缓存（减少BrowserForge调用）
-_header_template_cache = None
-_header_cache_lock = asyncio.Lock()
-
-
-async def get_header_template() -> Dict[str, str]:
-    """
-    获取缓存的header模板（仅在首次调用时生成，线程安全）
-    
-    Returns:
-        header模板字典
-    """
-    global _header_template_cache
-    
-    # 快速路径：如果已经缓存了，直接返回
-    if _header_template_cache is not None:
-        return _header_template_cache.copy()
-    
-    # 使用异步锁保护缓存初始化
-    async with _header_cache_lock:
-        # 双重检查：可能其他协程已经初始化了
-        if _header_template_cache is not None:
-            return _header_template_cache.copy()
-        
-        header_gen = get_header_generator_instance()
-        
-        # 使用BrowserForge生成基础headers（仅一次）
-        base_headers = header_gen.generate()
-        
-        # 设置特定于Z.AI的headers
-        base_headers["Origin"] = "https://chat.z.ai"
-        base_headers["Content-Type"] = "application/json"
-        base_headers["X-Fe-Version"] = settings.ZAI_FE_VERSION
-        
-        # 设置Fetch相关headers（用于CORS请求）
-        base_headers["Sec-Fetch-Dest"] = "empty"
-        base_headers["Sec-Fetch-Mode"] = "cors"
-        base_headers["Sec-Fetch-Site"] = "same-origin"
-        
-        # 确保Accept-Encoding包含zstd（现代浏览器支持）
-        if "Accept-Encoding" in base_headers:
-            if "zstd" not in base_headers["Accept-Encoding"]:
-                base_headers["Accept-Encoding"] = base_headers["Accept-Encoding"] + ", zstd"
-        else:
-            base_headers["Accept-Encoding"] = "gzip, deflate, br, zstd"
-        
-        # 确保Accept头适合API请求
-        base_headers["Accept"] = "*/*"
-        
-        # 保持连接
-        base_headers["Connection"] = "keep-alive"
-        
-        _header_template_cache = base_headers
-        info_log("✅ Header模板已缓存", 
-                  user_agent=base_headers.get("User-Agent", "")[:50],
-                  has_sec_ch_ua=("sec-ch-ua" in base_headers or "Sec-Ch-Ua" in base_headers))
-    
-    return _header_template_cache.copy()
-
-
-async def clear_header_template():
-    """
-    清除缓存的header模板，强制下次调用时重新生成（线程安全）
-    """
-    global _header_template_cache
-    async with _header_cache_lock:
-        _header_template_cache = None
-        info_log("🔄 Header模板缓存已清除")
-
-
-async def get_dynamic_headers(chat_id: str = "", user_agent: str = "") -> Dict[str, str]:
-    """使用缓存的header模板生成headers（性能优化，线程安全）
-    
-    Args:
-        chat_id: 对话ID，用于生成Referer
-        user_agent: 可选的指定User-Agent（保留接口兼容性，但不推荐使用）
-        
-    Returns:
-        完整的HTTP headers字典
-    """
-    # 使用缓存的模板（避免每次调用BrowserForge）
-    headers = await get_header_template()
-    
-    # 仅更新需要变化的字段
-    if chat_id:
-        headers["Referer"] = f"https://chat.z.ai/c/{chat_id}"
-    else:
-        headers["Referer"] = "https://chat.z.ai/"
-    
-    # 如果指定了user_agent，覆盖模板中的User-Agent
-    if user_agent:
-        headers["User-Agent"] = user_agent
-    
-    return headers
-
-
-def build_query_params(
-    timestamp: int, 
-    request_id: str, 
-    token: str,
-    user_agent: str,
-    chat_id: str = "",
-    user_id: str = ""
-) -> Dict[str, str]:
-    """构建查询参数，模拟真实的浏览器请求"""
-    if not user_id:
-        try:
-            payload = decode_jwt_payload(token)
-            user_id = payload['id']
-        except Exception:
-            user_id = "guest-user-" + str(abs(hash(token)) % 1000000)
-    
-    # 使用原生字符串构建 URL（性能优化，替代 furl 库）
-    if chat_id:
-        current_url = f"https://chat.z.ai/c/{chat_id}"
-        pathname = f"/c/{chat_id}"
-    else:
-        current_url = "https://chat.z.ai/"
-        pathname = "/"
-    
-    # 构建完整的查询参数，包括浏览器指纹信息
-    query_params = {
-        "timestamp": str(timestamp),
-        "requestId": request_id,
-        "user_id": user_id,
-        "version": "0.0.1",
-        "platform": "web",
-        "token": token,
-        "user_agent": user_agent,
-        "language": "zh-CN",
-        "languages": "zh-CN,zh",
-        "timezone": "Asia/Shanghai",
-        "cookie_enabled": "true",
-        "screen_width": "2048",
-        "screen_height": "1152",
-        "screen_resolution": "2048x1152",
-        "viewport_height": "654",
-        "viewport_width": "1038",
-        "viewport_size": "1038x654",
-        "color_depth": "24",
-        "pixel_ratio": "1.25",
-        "current_url": current_url,
-        "pathname": pathname,
-        "search": "",
-        "hash": "",
-        "host": "chat.z.ai",
-        "hostname": "chat.z.ai",
-        "protocol": "https:",
-        "referrer": "",
-        "title": "Z.ai Chat - Free AI powered by GLM-4.6 & GLM-4.5",
-        "timezone_offset": "-480",
-        "local_time": datetime.now(tz=get_timezone("Asia/Shanghai")).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "utc_time": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT"),
-        "is_mobile": "false",
-        "is_touch": "false",
-        "max_touch_points": "10",
-        "browser_name": "Chrome",
-        "os_name": "Windows",
-        "signature_timestamp": str(timestamp),
-    }
-    
-    return query_params
 
 
 class ZAITransformer:
@@ -313,7 +126,7 @@ class ZAITransformer:
     
     async def refresh_header_template(self):
         """刷新header模板（清除缓存并重新生成）"""
-        await clear_header_template()
+        await header_manager.clear_header_template()
         info_log("🔄 Header模板已刷新，下次请求将使用新的header")
     
     def _has_image_content(self, messages: List[Dict]) -> bool:

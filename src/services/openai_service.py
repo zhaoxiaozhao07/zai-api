@@ -244,7 +244,7 @@ class ChatCompletionService:
                         # answer 阶段：处理 edit_content 和 delta_content
                         # 关键区分：
                         # - 带 edit_index + edit_content：思考内容的完整版（替换之前的增量）
-                        # - 不带 edit_index + delta_content：实际正文内容
+                        # - delta_content：实际正文内容（无论是否有 edit_index 都应累积）
                         if phase == "answer":
                             has_edit_index = data.get("edit_index") is not None
                             
@@ -268,43 +268,37 @@ class ChatCompletionService:
                                         if new_thinking:
                                             thinking_content += new_thinking
                             
-                            # 不带 edit_index 的 delta_content 是正文内容
-                            elif delta_content:
+                            # delta_content 是正文内容（独立处理，不使用 elif）
+                            # 上游可能在同一数据包中同时返回 edit_content 和 delta_content
+                            if delta_content:
                                 answer_content += delta_content
                             continue
 
 
                         # other 阶段：可能有 usage 信息，也可能有最后的 edit_content 片段
-                        # 如果带有 edit_index，说明是工具调用相关内容，应放入 thinking
+                        # 注意：other 阶段的内容通常是正文的结尾部分，应放入 answer_content
                         if phase == "other":
                             # 收集 usage
                             if data.get("usage"):
                                 latest_usage = data["usage"]
 
-                            # 判断是否是工具调用相关内容（带 edit_index）
-                            has_edit_index = data.get("edit_index") is not None
-
-                            # 获取内容
+                            # 获取内容（优先使用 delta_content，因为它是增量正文）
                             tail_text = None
-                            if edit_content:
-                                tail_text = edit_content
-                            elif delta_content:
+                            if delta_content:
                                 tail_text = delta_content
+                            elif edit_content:
+                                # edit_content 可能包含格式标签，需要清理
+                                tail_text = self.parser.clean_thinking(edit_content)
 
                             if tail_text:
-                                if has_edit_index:
-                                    # 带 edit_index 的内容：先检测是否有图片
-                                    image_urls = self.parser.extract_image_urls(tail_text)
-                                    if image_urls:
-                                        # 有图片，转换为markdown格式放入 answer_content
-                                        markdown_images = self.parser.format_images_as_markdown(image_urls)
-                                        if markdown_images:
-                                            answer_content += "\n\n" + markdown_images + "\n\n"
-                                    else:
-                                        # 无图片，放入 thinking_content
-                                        thinking_content += tail_text
+                                # 先检测是否有图片
+                                image_urls = self.parser.extract_image_urls(tail_text)
+                                if image_urls:
+                                    markdown_images = self.parser.format_images_as_markdown(image_urls)
+                                    if markdown_images:
+                                        answer_content += "\n\n" + markdown_images + "\n\n"
                                 else:
-                                    # 普通内容放入 answer_content
+                                    # other 阶段的内容都放入 answer_content（因为是正文结尾）
                                     answer_content += tail_text
                             continue
 
@@ -316,7 +310,10 @@ class ChatCompletionService:
                         thinking_part, answer_part = self.parser.split_edit_content(latest_full_edit)
                         if thinking_part:
                             thinking_content = thinking_part
-                        if answer_part:
+                        # 对于 answer_part，如果已经通过 delta_content 累积了内容，
+                        # 则保留累积内容，因为 delta_content 通常更完整
+                        # 只有当 answer_content 为空时才使用解析出的 answer_part
+                        if answer_part and not answer_content:
                             answer_content = answer_part
 
                     # 清理内容
@@ -339,11 +336,9 @@ class ChatCompletionService:
                     )
 
                     # 构建消息对象
-                    # 对于非thinking模型，将thinking内容合并到正文，不返回 reasoning_content
-                    if not is_thinking_model and thinking_content:
-                        # 非thinking模型：将thinking内容作为前缀添加到answer_content
-                        answer_content = thinking_content + ("\n\n" if answer_content else "") + answer_content
-                        thinking_content = ""  # 清空，不作为reasoning_content返回
+                    # 对于非thinking模型，不返回 reasoning_content，thinking内容已在累积过程中处理
+                    # 注意：不再将 thinking_content 合并到 answer_content，因为非 thinking 模型
+                    # 的 thinking 阶段内容应该被忽略或已在累积过程中正确处理
                     
                     message = {
                         "role": "assistant",
