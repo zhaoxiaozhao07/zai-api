@@ -8,7 +8,7 @@
 
 - **OpenAI 格式兼容**：完全兼容 OpenAI API 请求和响应格式
 - **Z.AI 后端集成**：自动转换并调用 Z.AI API
-- **多模型支持**：支持 GLM-4.7（最新旗舰模型）、GLM-4.6、GLM-4.5、Thinking、V系列等多个模型
+- **多模型支持**：支持 GLM-5（最新旗舰模型）、GLM-4.7、GLM-4.6、GLM-4.5、Thinking、V系列等多个模型
 - **流式和非流式**：同时支持流式（SSE）和非流式响应模式
 - **Code插件支持**：支持Cline、Roo Code、Kilo Code等第三方插件
 
@@ -142,6 +142,8 @@ response = client.chat.completions.create(
 | `GLM_46_THINKING_MODEL`  | GLM-4.6 思考模型      | `GLM-4.6-Thinking`                       |
 | `GLM_47_MODEL`           | GLM-4.7 旗舰模型（最新）| `GLM-4.7`                                |
 | `GLM_47_THINKING_MODEL`  | GLM-4.7 思考模型      | `GLM-4.7-Thinking`                       |
+| `GLM_5_MODEL`           | GLM-5 旗舰模型（最新） | `GLM-5`                                   |
+| `GLM_5_THINKING_MODEL`  | GLM-5 思考模型        | `GLM-5-Think`                             |
 | `DEBUG_LOGGING`          | 详细日志输出          | `true`                                   |
 | `SKIP_AUTH_TOKEN`        | 跳过认证（用于测试）  | `false`                                  |
 | `MAX_RETRIES`            | 请求重试次数          | `3`                                      |
@@ -178,8 +180,10 @@ response = client.chat.completions.create(
 
 | 模型名称         | Z.AI 后端模型  | 说明                     |
 | ---------------- | -------------- | ----------------------- |
-| GLM-4.7          | GLM-4-7-API    | 最新旗舰模型             |
-| GLM-4.7-Thinking | GLM-4-7-API    | 4.7 思考版本             |
+| GLM-5            | glm-5          | 最新旗舰模型             |
+| GLM-5-Think      | glm-5          | GLM-5 思考版本           |
+| GLM-4.7          | glm-4.7        | 旗舰模型                |
+| GLM-4.7-Thinking | glm-4.7        | 4.7 思考版本             |
 | GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本                 |
 | GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本             |
 | GLM-4.5          | 0727-360B-API  | 主模型                   |

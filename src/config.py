@@ -148,6 +148,8 @@ class Settings(BaseSettings):
     GLM_46V_MODEL: str = os.getenv("GLM_46V_MODEL", "GLM-4.6V")
     GLM_47_MODEL: str = os.getenv("GLM_47_MODEL", "GLM-4.7")
     GLM_47_THINKING_MODEL: str = os.getenv("GLM_47_THINKING_MODEL", "GLM-4.7-Thinking")
+    GLM_5_MODEL: str = os.getenv("GLM_5_MODEL", "GLM-5")
+    GLM_5_THINKING_MODEL: str = os.getenv("GLM_5_THINKING_MODEL", "GLM-5-Think")
     
     # Server Configuration
     LISTEN_PORT: int = int(os.getenv("LISTEN_PORT", "8080"))
@@ -229,5 +231,7 @@ MODEL_MAPPING = {
     settings.GLM_46V_MODEL: "glm-4.6v",
     settings.GLM_47_MODEL: "glm-4.7",
     settings.GLM_47_THINKING_MODEL: "glm-4.7",
+    settings.GLM_5_MODEL: "glm-5",
+    settings.GLM_5_THINKING_MODEL: "glm-5",
 }
 

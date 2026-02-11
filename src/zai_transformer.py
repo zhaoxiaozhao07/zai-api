@@ -269,13 +269,16 @@ class ZAITransformer:
         is_thinking = (requested_model == settings.THINKING_MODEL or
                       requested_model == settings.GLM_46_THINKING_MODEL or
                       requested_model == settings.GLM_47_THINKING_MODEL or  # 只有 GLM-4.7-Thinking 启用 thinking
+                      requested_model == settings.GLM_5_THINKING_MODEL or  # GLM-5-Think 启用 thinking
                       requested_model == settings.GLM_45V_MODEL or  # glm4.5v 视觉模型也是 thinking 模型
                       requested_model == settings.GLM_46V_MODEL or  # glm4.6v 视觉模型也是 thinking 模型
                       request.get("reasoning", False))
         is_vision_model = (requested_model == settings.GLM_45V_MODEL or
                           requested_model == settings.GLM_46V_MODEL)
-        is_glm47_model = (requested_model == settings.GLM_47_MODEL or
-                          requested_model == settings.GLM_47_THINKING_MODEL)
+        is_simplified_model = (requested_model == settings.GLM_47_MODEL or
+                               requested_model == settings.GLM_47_THINKING_MODEL or
+                               requested_model == settings.GLM_5_MODEL or
+                               requested_model == settings.GLM_5_THINKING_MODEL)
 
         # 获取上游模型ID
         upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
@@ -369,17 +372,17 @@ class ZAITransformer:
                 "title_generation": True,
                 "tags_generation": True,
             }
-        elif is_glm47_model:
-            # GLM-4.7 系列采用简化格式，enable_thinking 根据具体模型决定
-            # glm-4.7: enable_thinking=False, glm-4.7-thinking: enable_thinking=True
-            glm47_enable_thinking = (requested_model == settings.GLM_47_THINKING_MODEL)
+        elif is_simplified_model:
+            # GLM-4.7 / GLM-5 系列采用简化格式，enable_thinking 根据具体模型决定
+            simplified_enable_thinking = (requested_model == settings.GLM_47_THINKING_MODEL or
+                                          requested_model == settings.GLM_5_THINKING_MODEL)
             features = {
                 "image_generation": False,
                 "web_search": False,
                 "auto_web_search": False,
                 "preview_mode": True,
                 "flags": [],
-                "enable_thinking": glm47_enable_thinking,
+                "enable_thinking": simplified_enable_thinking,
             }
             background_tasks = {
                 "title_generation": True,
@@ -422,8 +425,8 @@ class ZAITransformer:
         if is_vision_model:
             body["current_user_message_id"] = current_user_message_id
             body["current_user_message_parent_id"] = None
-        elif is_glm47_model:
-            # GLM-4.7 使用简化格式：添加 current_user_message_id/parent_id 但不添加 model_item
+        elif is_simplified_model:
+            # GLM-4.7 / GLM-5 使用简化格式：添加 current_user_message_id/parent_id 但不添加 model_item
             body["current_user_message_id"] = generate_uuid()
             body["current_user_message_parent_id"] = None
         else:
