@@ -10,8 +10,8 @@ import hmac
 import hashlib
 from typing import Dict, Any, Optional
 from functools import lru_cache
-from jose import jwt
-from jose.exceptions import JWTError
+import jwt
+from jwt.exceptions import DecodeError
 from .helpers import debug_log, perf_track
 
 
@@ -24,17 +24,11 @@ def decode_jwt_payload(token: str) -> Dict[str, Any]:
             return {}
         payload = jwt.decode(
             token,
-            key="",
-            options={
-                "verify_signature": False,
-                "verify_exp": False,
-                "verify_nbf": False,
-                "verify_iat": False,
-                "verify_aud": False,
-            },
+            options={"verify_signature": False},
+            algorithms=["HS256", "RS256"],
         )
         return payload
-    except JWTError as e:
+    except DecodeError as e:
         debug_log(f"JWT解码错误: {e}")
         return {}
     except Exception as e:
