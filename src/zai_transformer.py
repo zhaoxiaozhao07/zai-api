@@ -304,6 +304,10 @@ class ZAITransformer:
             {"type": "mcp", "server": "deep-research", "status": "hidden"}
         ]
 
+        # 生成当前用户消息ID（用于关联files中的ref_user_msg_id）
+        # 视觉模型和简化模型（GLM-4.7/GLM-5）都需要此ID
+        current_user_message_id = generate_uuid() if (is_vision_model or is_simplified_model) else None
+
         # 处理图像上传
         files_list = []
         uploaded_files_map = {}  # 用于视觉模型(GLM-4.5V/GLM-4.6V)：原始URL -> 文件信息的映射
@@ -316,6 +320,9 @@ class ZAITransformer:
                     if file_obj:
                         # 非视觉模型：添加到files列表
                         if not is_vision_model:
+                            # 简化模型（GLM-4.7/GLM-5）需要关联 ref_user_msg_id
+                            if is_simplified_model and current_user_message_id:
+                                file_obj["ref_user_msg_id"] = current_user_message_id
                             files_list.append(file_obj)
                         else:
                             # 视觉模型：保存映射关系，稍后修改messages中的URL
@@ -328,10 +335,7 @@ class ZAITransformer:
         elif image_urls:
             info_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
         
-        # GLM-4.5V特殊处理：修改messages中的图片URL格式
-        # 生成当前用户消息ID（用于关联files）
-        current_user_message_id = generate_uuid() if is_vision_model else None
-        
+
         if is_vision_model and uploaded_files_map:
             info_log(f"[Vision] 开始修改消息中的图片URL格式")
             for msg in messages:
@@ -421,13 +425,18 @@ class ZAITransformer:
             "id": generate_uuid(),
         }
 
+        # 简化模型（GLM-4.7/GLM-5）需要 extra 字段
+        if is_simplified_model:
+            body["extra"] = {}
+
         # 与抓包保持一致：GLM-4.5V/4.6V/4.7 需要 current_user_message_id/parent_id，且不上送 model_item
         if is_vision_model:
             body["current_user_message_id"] = current_user_message_id
             body["current_user_message_parent_id"] = None
         elif is_simplified_model:
             # GLM-4.7 / GLM-5 使用简化格式：添加 current_user_message_id/parent_id 但不添加 model_item
-            body["current_user_message_id"] = generate_uuid()
+            # 复用前面生成的 current_user_message_id（已与 files 中的 ref_user_msg_id 关联）
+            body["current_user_message_id"] = current_user_message_id or generate_uuid()
             body["current_user_message_parent_id"] = None
         else:
             body["model_item"] = {

@@ -197,7 +197,7 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
         "type": "image",
         "file": file_data,
         "id": file_data["id"],
-        "url": f"/api/v1/files/{file_data['id']}/content",
+        "url": f"/api/v1/files/{file_data['id']}",
         "name": file_data.get("filename", "image"),
         "status": "uploaded",
         "size": file_data.get("meta", {}).get("size", 0),
