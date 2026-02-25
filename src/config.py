@@ -138,16 +138,8 @@ class Settings(BaseSettings):
     _env_fe_version: Optional[str] = os.getenv("ZAI_FE_VERSION", "prod-fe-1.0.108")
     ZAI_FE_VERSION: str = ""  # 稍后在模块级别初始化为自动获取的版本
     
-    # Model Configuration
-    PRIMARY_MODEL: str = os.getenv("PRIMARY_MODEL", "GLM-4.5")
-    THINKING_MODEL: str = os.getenv("THINKING_MODEL", "GLM-4.5-Thinking")
-    AIR_MODEL: str = os.getenv("AIR_MODEL", "GLM-4.5-Air")
-    GLM_45V_MODEL: str = os.getenv("GLM_45V_MODEL", "GLM-4.5V")
-    GLM_46_MODEL: str = os.getenv("GLM_46_MODEL", "GLM-4.6")
-    GLM_46_THINKING_MODEL: str = os.getenv("GLM_46_THINKING_MODEL", "GLM-4.6-Thinking")
+    # Model Configuration - 仅保留 GLM-5 系列和 GLM-4.6V
     GLM_46V_MODEL: str = os.getenv("GLM_46V_MODEL", "GLM-4.6V")
-    GLM_47_MODEL: str = os.getenv("GLM_47_MODEL", "GLM-4.7")
-    GLM_47_THINKING_MODEL: str = os.getenv("GLM_47_THINKING_MODEL", "GLM-4.7-Thinking")
     GLM_5_MODEL: str = os.getenv("GLM_5_MODEL", "GLM-5")
     GLM_5_THINKING_MODEL: str = os.getenv("GLM_5_THINKING_MODEL", "GLM-5-Think")
     
@@ -220,17 +212,9 @@ def _init_fe_version():
 
 _init_fe_version()
 
-# Model Mapping Configuration - ZAI API模型映射
+# Model Mapping Configuration - ZAI API模型映射（仅保留 GLM-5 系列和 GLM-4.6V）
 MODEL_MAPPING = {
-    settings.PRIMARY_MODEL: "0727-360B-API",
-    settings.THINKING_MODEL: "0727-360B-API",
-    settings.AIR_MODEL: "0727-106B-API",
-    settings.GLM_45V_MODEL: "glm-4.5v",
-    settings.GLM_46_MODEL: "GLM-4-6-API-V1",
-    settings.GLM_46_THINKING_MODEL: "GLM-4-6-API-V1",
     settings.GLM_46V_MODEL: "glm-4.6v",
-    settings.GLM_47_MODEL: "glm-4.7",
-    settings.GLM_47_THINKING_MODEL: "glm-4.7",
     settings.GLM_5_MODEL: "glm-5",
     settings.GLM_5_THINKING_MODEL: "glm-5",
 }

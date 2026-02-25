@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **OpenAI 格式兼容**：兼容 OpenAI API 请求/响应格式，支持流式（SSE）和非流式模式
-- **多模型支持**：支持 GLM-5、GLM-4.7、GLM-4.6、GLM-4.5、Thinking、V系列等多个模型
+- **多模型支持**：支持 GLM-5 系列、GLM-4.6V 视觉模型
 - **插件兼容**：支持 Cline、Roo Code、Kilo Code 等第三方插件
 - **运维友好**：健康检查、CORS、代理配置、Token 认证、请求重试、可配置日志
 
@@ -57,7 +57,7 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="GLM-4.5",
+    model="GLM-5",
     messages=[{"role": "user", "content": "你好"}]
 )
 ```
@@ -71,21 +71,11 @@ response = client.chat.completions.create(
 | `/v1/chat/completions` | POST | 聊天补全（兼容 OpenAI） |
 | `/v1/models`           | GET  | 模型列表                |
 
-## 支持的模型
-
-| 模型名称         | Z.AI 后端模型  | 说明             |
-| ---------------- | -------------- | ---------------- |
-| GLM-5            | glm-5          | 最新旗舰模型     |
-| GLM-5-Think      | glm-5          | GLM-5 思考版本   |
-| GLM-4.7          | glm-4.7        | 旗舰模型         |
-| GLM-4.7-Thinking | glm-4.7        | 4.7 思考版本     |
-| GLM-4.6          | GLM-4-6-API-V1 | 4.6 版本         |
-| GLM-4.6-Thinking | GLM-4-6-API-V1 | 4.6 思考版本     |
-| GLM-4.5          | 0727-360B-API  | 主模型           |
-| GLM-4.5-Thinking | 0727-360B-API  | 思考模型         |
-| GLM-4.5-Air      | 0727-106B-API  | 轻量级模型       |
-| GLM-4.5V         | glm-4.5v       | 视觉模型         |
-| GLM-4.6V         | glm-4.6v       | 视觉旗舰模型     |
+| 模型名称    | Z.AI 后端模型 | 说明           |
+| ----------- | ------------- | -------------- |
+| GLM-5       | glm-5         | 最新旗舰模型   |
+| GLM-5-Think | glm-5         | GLM-5 思考版本 |
+| GLM-4.6V    | glm-4.6v      | 视觉旗舰模型   |
 
 
 ## 参考项目

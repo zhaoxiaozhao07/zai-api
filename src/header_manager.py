@@ -213,7 +213,7 @@ class HeaderManager:
             "hostname": "chat.z.ai",
             "protocol": "https:",
             "referrer": "",
-            "title": "Z.ai Chat - Free AI powered by GLM-4.6 & GLM-4.5",
+            "title": "Z.ai Chat - Free AI powered by GLM-5",
             "timezone_offset": "-480",
             "local_time": datetime.now(tz=tz).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
             "utc_time": datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT"),

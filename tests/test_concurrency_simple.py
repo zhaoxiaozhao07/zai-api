@@ -30,7 +30,7 @@ async def send_request(client, request_id):
     }
     
     payload = {
-        "model": "glm-4.5",
+        "model": "GLM-5",
         "messages": [{"role": "user", "content": f"你好，这是第{request_id}个测试请求。"}],
         "stream": False,
         "max_tokens": 100

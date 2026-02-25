@@ -27,7 +27,7 @@ def test_non_stream():
     }
     
     payload = {
-        "model": "GLM-4.5",
+        "model": "GLM-5",
         "messages": [
             {
                 "role": "user",
@@ -97,7 +97,7 @@ def test_stream():
     }
     
     payload = {
-        "model": "GLM-4.5",
+        "model": "GLM-5",
         "messages": [
             {
                 "role": "user",

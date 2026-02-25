@@ -155,7 +155,7 @@ class ZAITransformer:
         
         Args:
             messages: 原始消息列表
-            is_vision_model: 是否是视觉模型（GLM-4.5V/GLM-4.6V），视觉模型保留图片在messages中
+            is_vision_model: 是否是视觉模型（GLM-4.6V），视觉模型保留图片在messages中
             
         Returns:
             (处理后的消息列表, 图片URL列表)
@@ -257,7 +257,7 @@ class ZAITransformer:
         Returns:
             转换后的请求字典
         """
-        info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.PRIMARY_MODEL)} -> Z.AI")
+        info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.GLM_5_MODEL)} -> Z.AI")
 
         # 获取认证令牌
         token = await self.get_token(http_client=client)
@@ -265,23 +265,16 @@ class ZAITransformer:
         messages = request.get("messages", [])
 
         # 确定请求的模型特性
-        requested_model = request.get("model", settings.PRIMARY_MODEL)
-        is_thinking = (requested_model == settings.THINKING_MODEL or
-                      requested_model == settings.GLM_46_THINKING_MODEL or
-                      requested_model == settings.GLM_47_THINKING_MODEL or  # 只有 GLM-4.7-Thinking 启用 thinking
-                      requested_model == settings.GLM_5_THINKING_MODEL or  # GLM-5-Think 启用 thinking
-                      requested_model == settings.GLM_45V_MODEL or  # glm4.5v 视觉模型也是 thinking 模型
-                      requested_model == settings.GLM_46V_MODEL or  # glm4.6v 视觉模型也是 thinking 模型
+        requested_model = request.get("model", settings.GLM_5_MODEL)
+        is_thinking = (requested_model == settings.GLM_5_THINKING_MODEL or
+                      requested_model == settings.GLM_46V_MODEL or  # GLM-4.6V 视觉模型也是 thinking 模型
                       request.get("reasoning", False))
-        is_vision_model = (requested_model == settings.GLM_45V_MODEL or
-                          requested_model == settings.GLM_46V_MODEL)
-        is_simplified_model = (requested_model == settings.GLM_47_MODEL or
-                               requested_model == settings.GLM_47_THINKING_MODEL or
-                               requested_model == settings.GLM_5_MODEL or
+        is_vision_model = (requested_model == settings.GLM_46V_MODEL)
+        is_simplified_model = (requested_model == settings.GLM_5_MODEL or
                                requested_model == settings.GLM_5_THINKING_MODEL)
 
-        # 获取上游模型ID
-        upstream_model_id = self.model_mapping.get(requested_model, "0727-360B-API")
+        # 获取上游模型ID（默认回退到 glm-5）
+        upstream_model_id = self.model_mapping.get(requested_model, "glm-5")
         debug_log(f"  模型映射: {requested_model} -> {upstream_model_id}")
 
         # 处理消息列表并提取图像
@@ -292,25 +285,17 @@ class ZAITransformer:
         # 构建MCP服务器列表
         mcp_servers = []
         # GLM-4.6V 添加 VLM 专有服务器（支持图片搜索、识别、处理）
-        if requested_model == settings.GLM_46V_MODEL:
+        if is_vision_model:
             mcp_servers.extend(["vlm-image-search", "vlm-image-recognition", "vlm-image-processing"])
-            debug_log(f"🔍 检测到 GLM-4.6V 模型，添加 VLM MCP 服务器")
-        
-        # 构建隐藏的MCP服务器特性列表
-        hidden_mcp_features = [
-            {"type": "mcp", "server": "vibe-coding", "status": "hidden"},
-            {"type": "mcp", "server": "ppt-maker", "status": "hidden"},
-            {"type": "mcp", "server": "image-search", "status": "hidden"},
-            {"type": "mcp", "server": "deep-research", "status": "hidden"}
-        ]
+            debug_log("检测到 GLM-4.6V 模型，添加 VLM MCP 服务器")
 
         # 生成当前用户消息ID（用于关联files中的ref_user_msg_id）
-        # 视觉模型和简化模型（GLM-4.7/GLM-5）都需要此ID
+        # 视觉模型和简化模型都需要此ID
         current_user_message_id = generate_uuid() if (is_vision_model or is_simplified_model) else None
 
         # 处理图像上传
         files_list = []
-        uploaded_files_map = {}  # 用于视觉模型(GLM-4.5V/GLM-4.6V)：原始URL -> 文件信息的映射
+        uploaded_files_map = {}  # 用于视觉模型(GLM-4.6V)：原始URL -> 文件信息的映射
         
         if image_urls and client:
             info_log(f"检测到 {len(image_urls)} 张图像，开始上传")
@@ -320,7 +305,7 @@ class ZAITransformer:
                     if file_obj:
                         # 非视觉模型：添加到files列表
                         if not is_vision_model:
-                            # 简化模型（GLM-4.7/GLM-5）需要关联 ref_user_msg_id
+                            # 简化模型（GLM-5）需要关联 ref_user_msg_id
                             if is_simplified_model and current_user_message_id:
                                 file_obj["ref_user_msg_id"] = current_user_message_id
                             files_list.append(file_obj)
@@ -348,9 +333,9 @@ class ZAITransformer:
                                 # 提取file信息
                                 file_data = file_info.get("file", {})
                                 file_id = file_data.get("id", "")
-                                # GLM-4.5V格式的URL只需要file_id
+                                # 视觉模型格式的URL只需要file_id
                                 part["image_url"]["url"] = file_id
-                                debug_log(f"[GLM-4.5V] 图片URL已转换", 
+                                debug_log("[GLM-4.6V] 图片URL已转换", 
                                          original=original_url[:50], 
                                          new=file_id)
                                 
@@ -361,9 +346,9 @@ class ZAITransformer:
         # 构建上游请求体
         chat_id = generate_uuid()
 
-        # GLM-4.5V 对 features/background_tasks 的要求与常规模型略有不同，
-        # 尽量对齐实际抓包格式，避免上游返回 "Oops" 错误。
+        # 根据模型类型构建 features 和 background_tasks
         if is_vision_model:
+            # GLM-4.6V 视觉模型
             features = {
                 "image_generation": False,
                 "web_search": False,
@@ -372,40 +357,21 @@ class ZAITransformer:
                 "flags": [],
                 "enable_thinking": True,
             }
-            background_tasks = {
-                "title_generation": True,
-                "tags_generation": True,
-            }
-        elif is_simplified_model:
-            # GLM-4.7 / GLM-5 系列采用简化格式，enable_thinking 根据具体模型决定
-            simplified_enable_thinking = (requested_model == settings.GLM_47_THINKING_MODEL or
-                                          requested_model == settings.GLM_5_THINKING_MODEL)
-            features = {
-                "image_generation": False,
-                "web_search": False,
-                "auto_web_search": False,
-                "preview_mode": True,
-                "flags": [],
-                "enable_thinking": simplified_enable_thinking,
-            }
-            background_tasks = {
-                "title_generation": True,
-                "tags_generation": True,
-            }
         else:
+            # GLM-5 系列（及其他未知模型统一走此路径）
             features = {
                 "image_generation": False,
                 "web_search": False,
                 "auto_web_search": False,
                 "preview_mode": True,
                 "flags": [],
-                "features": hidden_mcp_features,
-                "enable_thinking": is_thinking,
+                "enable_thinking": requested_model == settings.GLM_5_THINKING_MODEL,
             }
-            background_tasks = {
-                "title_generation": False,
-                "tags_generation": False,
-            }
+
+        background_tasks = {
+            "title_generation": True,
+            "tags_generation": True,
+        }
 
         body = {
             "stream": True,
@@ -423,37 +389,19 @@ class ZAITransformer:
             },
             "chat_id": chat_id,
             "id": generate_uuid(),
+            "extra": {},
         }
 
-        # 简化模型（GLM-4.7/GLM-5）需要 extra 字段
-        if is_simplified_model:
-            body["extra"] = {}
-
-        # 与抓包保持一致：GLM-4.5V/4.6V/4.7 需要 current_user_message_id/parent_id，且不上送 model_item
-        if is_vision_model:
-            body["current_user_message_id"] = current_user_message_id
-            body["current_user_message_parent_id"] = None
-        elif is_simplified_model:
-            # GLM-4.7 / GLM-5 使用简化格式：添加 current_user_message_id/parent_id 但不添加 model_item
-            # 复用前面生成的 current_user_message_id（已与 files 中的 ref_user_msg_id 关联）
-            body["current_user_message_id"] = current_user_message_id or generate_uuid()
-            body["current_user_message_parent_id"] = None
-        else:
-            body["model_item"] = {
-                "id": upstream_model_id,
-                "name": requested_model,
-                "owned_by": "openai"
-            }
+        # 所有保留的模型都需要 current_user_message_id/parent_id（不再使用 model_item）
+        body["current_user_message_id"] = current_user_message_id or generate_uuid()
+        body["current_user_message_parent_id"] = None
         
         # 如果有上传的文件，添加到body中
         if files_list:
             body["files"] = files_list
             debug_log(f"添加 {len(files_list)} 个文件到请求body")
         
-        # GLM-4.5V需要添加current_user_message_id字段
-        if is_vision_model and current_user_message_id:
-            body["current_user_message_id"] = current_user_message_id
-            debug_log(f"[GLM-4.5V] 添加current_user_message_id: {current_user_message_id}")
+        # 已在上方统一添加 current_user_message_id
 
         # 生成时间戳和请求ID
         timestamp = int(time.time() * 1000)
@@ -525,5 +473,5 @@ class ZAITransformer:
             "config": config,
             "token": token,
             "is_thinking": is_thinking,  # 标记是否为thinking模型，响应处理时用于判断是否输出reasoning_content
-            "is_vision_model": is_vision_model,  # 标记是否为V系列视觉模型（4.5v/4.6v），用于区分多阶段思考格式
+            "is_vision_model": is_vision_model,  # 标记是否为V系列视觉模型（GLM-4.6V），用于区分多阶段思考格式
         }

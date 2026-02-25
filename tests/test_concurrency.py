@@ -72,7 +72,7 @@ def print_section(title: str, width: int = 100):
 async def send_single_request(
     client: httpx.AsyncClient,
     request_id: int,
-    model: str = "glm-4.5",
+    model: str = "GLM-5",
     stream: bool = False,
     message_index: int = 0
 ) -> RequestResult:
@@ -194,7 +194,7 @@ async def send_single_request(
 async def run_concurrent_requests(
     num_requests: int,
     concurrency: int,
-    model: str = "glm-4.5",
+    model: str = "GLM-5",
     stream: bool = False,
     timeout: float = 60.0
 ) -> List[RequestResult]:

@@ -493,7 +493,7 @@ class ChatCompletionService:
                     
                     # 检查是否为thinking模型，非thinking模型不输出 reasoning_content
                     is_thinking_model = transformed.get("is_thinking", False)
-                    # 检查是否为 V 系列视觉模型（4.5v/4.6v），用于区分多阶段思考格式
+                    # 检查是否为 V 系列视觉模型（GLM-4.6V），用于区分多阶段思考格式
                     is_vision_model = transformed.get("is_vision_model", False)
 
                     # V系列输出响应日志辅助函数

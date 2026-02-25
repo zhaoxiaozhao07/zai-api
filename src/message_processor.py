@@ -48,7 +48,7 @@ class MessageProcessor:
         
         Args:
             messages: 原始消息列表
-            is_vision_model: 是否是视觉模型（GLM-4.5V/GLM-4.6V），视觉模型保留图片在 messages 中
+            is_vision_model: 是否是视觉模型（GLM-4.6V），视觉模型保留图片在 messages 中
             
         Returns:
             (处理后的消息列表, 图片 URL 列表)

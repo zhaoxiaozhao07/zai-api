@@ -31,11 +31,9 @@ TEST_MESSAGES = [
 
 # 可用模型列表
 AVAILABLE_MODELS = [
-    "glm-4.5",
-    "glm-4.5-thinking",
-    "glm-4.5-air",
-    "glm-4.6",
-    "glm-4.6-thinking",
+    "GLM-5",
+    "GLM-5-Think",
+    "GLM-4.6V",
 ]
 
 
@@ -46,7 +44,7 @@ def print_section(title: str):
     print("=" * 80 + "\n")
 
 
-def test_non_stream(model: str = "glm-4.5", messages: list = None) -> Optional[dict]:
+def test_non_stream(model: str = "GLM-5", messages: list = None) -> Optional[dict]:
     """
     测试非流式请求
     
@@ -127,7 +125,7 @@ def test_non_stream(model: str = "glm-4.5", messages: list = None) -> Optional[d
         return None
 
 
-def test_stream(model: str = "glm-4.5", messages: list = None):
+def test_stream(model: str = "GLM-5", messages: list = None):
     """
     测试流式请求
     
@@ -306,15 +304,15 @@ def main():
     models = test_models_list()
     
     # 3. 测试非流式请求
-    test_non_stream(model="glm-4.5")
+    test_non_stream(model="GLM-5")
     
     # 4. 测试流式请求
-    test_stream(model="glm-4.5")
+    test_stream(model="GLM-5")
     
     # 5. 测试思考模型（非流式）
     print_section("测试思考模型（非流式）")
     test_non_stream(
-        model="glm-4.5-thinking",
+        model="GLM-5-Think",
         messages=[
             {
                 "role": "user",
