@@ -8,7 +8,7 @@ import logging
 import structlog
 from structlog import contextvars as struct_context
 from contextlib import contextmanager
-from functools import wraps
+from functools import wraps, lru_cache
 from typing import Callable, Any, Optional
 from .config import settings
 
@@ -67,6 +67,21 @@ def reset_request_context(*keys: str) -> None:
         struct_context.unbind_contextvars(*keys)
     else:
         struct_context.clear_contextvars()
+
+
+@lru_cache(maxsize=8)
+def get_timezone(tz_name: str = "Asia/Shanghai"):
+    """获取时区对象（带缓存），支持多种依赖回退"""
+    try:
+        from dateutil import tz as dateutil_tz
+        return dateutil_tz.gettz(tz_name)
+    except ImportError:
+        try:
+            import zoneinfo
+            return zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            import pytz
+            return pytz.timezone(tz_name)
 
 
 def error_log(message: str, *args, **kwargs) -> None:

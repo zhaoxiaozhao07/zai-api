@@ -162,20 +162,6 @@ class Settings(BaseSettings):
     # Proxy Configuration - 代理配置（支持多个代理）
     # 从环境变量和proxys.txt文件加载代理列表，并去重合并
     PROXY_LIST: list[str] = Field(default_factory=_get_proxy_list)
-
-    # 为了向后兼容，保留原有的配置方式
-    HTTP_PROXY_LIST: list[str] = Field(default_factory=_get_proxy_list)
-    HTTPS_PROXY_LIST: list[str] = Field(default_factory=_get_proxy_list)
-
-    # 保留单代理配置的兼容性
-    HTTP_PROXY: Optional[str] = None
-    HTTPS_PROXY: Optional[str] = None
-
-    def model_post_init(self, __context: Any) -> None:
-        proxy_list = self.PROXY_LIST or []
-        proxy = proxy_list[0] if proxy_list else None
-        object.__setattr__(self, "HTTP_PROXY", proxy)
-        object.__setattr__(self, "HTTPS_PROXY", proxy)
     
     # 代理策略：failover（失败切换）或 round-robin（轮询）
     PROXY_STRATEGY: str = os.getenv("PROXY_STRATEGY", "failover").lower()

@@ -16,7 +16,7 @@ from datetime import datetime
 from fastapi import HTTPException
 
 from .config import settings, MODEL_MAPPING
-from .helpers import error_log, info_log, debug_log, perf_timer, perf_track
+from .helpers import error_log, info_log, debug_log, perf_timer, perf_track, get_timezone
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
 from .image_handler import process_image_content
@@ -24,18 +24,7 @@ from .header_manager import header_manager
 from .message_processor import message_processor
 
 
-@lru_cache(maxsize=8)
-def get_timezone(tz_name: str = "Asia/Shanghai"):
-    """
-    获取时区对象（带缓存）
-    
-    Args:
-        tz_name: 时区名称，默认 Asia/Shanghai
-        
-    Returns:
-        时区对象
-    """
-    return tz.gettz(tz_name)
+
 
 
 def generate_time_variables(timezone_name: str = "Asia/Shanghai") -> Dict[str, str]:

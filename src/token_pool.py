@@ -332,12 +332,6 @@ class TokenPool:
         }
 
         return status
-    
-    async def reload(self):
-        """重新加载token池"""
-        info_log("[RELOAD] 重新加载token池")
-        async with self._switch_lock:  # 重新加载时也需要异步锁
-            self._load_tokens()
 
 # 保留兼容性的全局函数（内部调用类方法）
 async def get_token_pool() -> TokenPool:

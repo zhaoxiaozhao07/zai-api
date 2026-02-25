@@ -15,7 +15,7 @@ from browserforge.headers import HeaderGenerator
 from furl import furl
 
 from .config import settings
-from .helpers import info_log
+from .helpers import info_log, get_timezone
 from .signature import decode_jwt_payload
 
 
@@ -57,21 +57,7 @@ class HeaderManager:
             )
         return self._header_generator
     
-    def _get_timezone(self, tz_name: str = "Asia/Shanghai"):
-        """获取时区对象（带缓存）"""
-        if self._cached_timezone is None:
-            try:
-                # 使用 dateutil（与原有代码保持一致）
-                from dateutil import tz as dateutil_tz
-                self._cached_timezone = dateutil_tz.gettz(tz_name)
-            except ImportError:
-                try:
-                    import zoneinfo
-                    self._cached_timezone = zoneinfo.ZoneInfo(tz_name)
-                except Exception:
-                    import pytz
-                    self._cached_timezone = pytz.timezone(tz_name)
-        return self._cached_timezone
+
     
     async def get_header_template(self) -> Dict[str, str]:
         """
@@ -182,7 +168,7 @@ class HeaderManager:
             url = furl("https://chat.z.ai")
             pathname = "/"
         
-        tz = self._get_timezone("Asia/Shanghai")
+        tz = get_timezone("Asia/Shanghai")
         
         # 构建完整的查询参数
         query_params = {
