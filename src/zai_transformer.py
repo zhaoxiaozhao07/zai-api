@@ -17,7 +17,7 @@ from dateutil import tz
 from datetime import datetime
 from fastapi import HTTPException
 
-from .config import settings, MODEL_MAPPING
+from .config import settings
 from .helpers import error_log, info_log, debug_log, perf_timer, perf_track, get_timezone
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
@@ -25,6 +25,12 @@ from .image_handler import process_image_content
 from .header_manager import header_manager
 from .message_processor import message_processor
 from .conversation_state import conversation_state
+
+PUBLIC_GLM_46V_MODEL = "glm-4.6v"
+PUBLIC_GLM_5_MODEL = "glm-5"
+PUBLIC_GLM_47_MODEL = "glm-4.7"
+LEGACY_GLM_46V_ALIASES = frozenset({"GLM-4.6V"})
+LEGACY_GLM_5_ALIASES = frozenset({"GLM-5", "GLM-5-Think"})
 
 
 
@@ -71,9 +77,6 @@ class ZAITransformer:
         # 不再在初始化时固定api_url，而是在transform_request_in中动态获取
         # self.api_url = settings.API_ENDPOINT
 
-        # 使用统一配置的模型映射
-        self.model_mapping = MODEL_MAPPING
-        
         # 初始化签名生成器
         self.signature_generator = SignatureGenerator()
 
@@ -278,6 +281,7 @@ class ZAITransformer:
         client,
         token: str,
         model: str,
+        enable_thinking: bool,
         user_message: str,
         upstream_url: Optional[str] = None,
     ) -> str:
@@ -321,7 +325,7 @@ class ZAITransformer:
                     }
                 ],
                 "mcp_servers": [],
-                "enable_thinking": True,
+                "enable_thinking": enable_thinking,
                 "auto_web_search": False,
                 "message_version": 1,
                 "extra": {},
@@ -371,6 +375,61 @@ class ZAITransformer:
 
         return chat_id
 
+    def _is_glm_46v_model(self, model: Any) -> bool:
+        if not isinstance(model, str):
+            return False
+        return model in {
+            PUBLIC_GLM_46V_MODEL,
+            settings.GLM_46V_MODEL,
+            *LEGACY_GLM_46V_ALIASES,
+        }
+
+    def _is_glm_5_family_model(self, model: Any) -> bool:
+        if not isinstance(model, str):
+            return False
+        return model in {
+            PUBLIC_GLM_5_MODEL,
+            settings.GLM_5_MODEL,
+            settings.GLM_5_THINKING_MODEL,
+            *LEGACY_GLM_5_ALIASES,
+        }
+
+    def _is_glm_47_model(self, model: Any) -> bool:
+        return isinstance(model, str) and model == PUBLIC_GLM_47_MODEL
+
+    def _normalize_requested_model(self, model: Any) -> str:
+        if not isinstance(model, str) or not model.strip():
+            return PUBLIC_GLM_5_MODEL
+
+        normalized_model = model.strip()
+        if self._is_glm_46v_model(normalized_model):
+            return PUBLIC_GLM_46V_MODEL
+        if self._is_glm_5_family_model(normalized_model):
+            return PUBLIC_GLM_5_MODEL
+        if self._is_glm_47_model(normalized_model):
+            return PUBLIC_GLM_47_MODEL
+        return normalized_model
+
+    def _resolve_glm_5_thinking(self, request: Dict[str, Any]) -> bool:
+        if "thinking" in request:
+            thinking = request.get("thinking")
+            return isinstance(thinking, dict) and thinking.get("type") == "enabled"
+
+        if "reasoning_effort" in request:
+            reasoning_effort = request.get("reasoning_effort")
+            if isinstance(reasoning_effort, str):
+                return reasoning_effort.lower() != "none"
+            return bool(reasoning_effort)
+
+        if "enable_thinking" in request:
+            return request.get("enable_thinking") is True
+
+        original_model = request.get("_original_model")
+        if original_model in {settings.GLM_5_THINKING_MODEL, "GLM-5-Think"}:
+            return True
+
+        return False
+
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
     async def transform_request_in(self, request: Dict[str, Any], client=None, upstream_url: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -384,10 +443,10 @@ class ZAITransformer:
         Returns:
             转换后的请求字典
         """
-        info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.GLM_5_MODEL)} -> Z.AI")
+        info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', PUBLIC_GLM_5_MODEL)} -> Z.AI")
 
         # 确定请求的模型特性
-        requested_model = request.get("model", settings.GLM_5_MODEL)
+        requested_model = self._normalize_requested_model(request.get("model", PUBLIC_GLM_5_MODEL))
         original_messages = request.get("messages", [])
         history_key, cached_session = conversation_state.resolve_session(requested_model, original_messages)
         has_prior_history = len(original_messages) > 1
@@ -419,15 +478,23 @@ class ZAITransformer:
 
         messages = source_messages
 
-        is_thinking = (requested_model == settings.GLM_5_THINKING_MODEL or
-                       requested_model == settings.GLM_46V_MODEL or  # GLM-4.6V 视觉模型也是 thinking 模型
-                       request.get("reasoning", False))
-        is_vision_model = (requested_model == settings.GLM_46V_MODEL)
-        is_simplified_model = (requested_model == settings.GLM_5_MODEL or
-                               requested_model == settings.GLM_5_THINKING_MODEL)
+        is_vision_model = requested_model == PUBLIC_GLM_46V_MODEL
+        is_glm_5_model = requested_model == PUBLIC_GLM_5_MODEL
+        is_glm_47_model = requested_model == PUBLIC_GLM_47_MODEL
+        is_thinking = is_vision_model
+        if is_glm_5_model or is_glm_47_model:
+            is_thinking = self._resolve_glm_5_thinking(request)
+        is_simplified_model = is_glm_5_model or is_glm_47_model
 
-        # 获取上游模型ID（默认回退到 glm-5）
-        upstream_model_id = self.model_mapping.get(requested_model, "glm-5")
+        # 获取上游模型ID
+        if is_vision_model:
+            upstream_model_id = PUBLIC_GLM_46V_MODEL
+        elif is_glm_47_model:
+            upstream_model_id = PUBLIC_GLM_47_MODEL
+        elif is_glm_5_model:
+            upstream_model_id = PUBLIC_GLM_5_MODEL
+        else:
+            upstream_model_id = PUBLIC_GLM_5_MODEL
         debug_log(f"  模型映射: {requested_model} -> {upstream_model_id}")
 
         # 处理消息列表并提取图像
@@ -506,6 +573,7 @@ class ZAITransformer:
                 client=client,
                 token=token,
                 model=upstream_model_id,
+                enable_thinking=is_thinking,
                 user_message=user_content,
                 upstream_url=upstream_url,
             )
@@ -529,7 +597,7 @@ class ZAITransformer:
                 "auto_web_search": False,
                 "preview_mode": True,
                 "flags": [],
-                "enable_thinking": requested_model == settings.GLM_5_THINKING_MODEL,
+                "enable_thinking": is_thinking,
             }
 
         background_tasks = {

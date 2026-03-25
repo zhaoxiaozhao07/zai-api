@@ -47,6 +47,10 @@ router = APIRouter()
 
 logger = get_logger("openai_api")
 
+PUBLIC_GLM_46V_MODEL = "glm-4.6v"
+PUBLIC_GLM_5_MODEL = "glm-5"
+PUBLIC_GLM_47_MODEL = "glm-4.7"
+
 service = chat_completion_service
 
 
@@ -56,9 +60,9 @@ async def list_models():
     current_time = int(time.time())
     response = ModelsResponse(
         data=[
-            Model(id=settings.GLM_46V_MODEL, created=current_time, owned_by="z.ai"),
-            Model(id=settings.GLM_5_MODEL, created=current_time, owned_by="z.ai"),
-            Model(id=settings.GLM_5_THINKING_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=PUBLIC_GLM_46V_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=PUBLIC_GLM_5_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=PUBLIC_GLM_47_MODEL, created=current_time, owned_by="z.ai"),
         ]
     )
     return response
@@ -199,7 +203,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
-def create_openai_response(chat_id: str, model: str, content: str, reasoning_content: str = "", usage: dict = None) -> dict:
+def create_openai_response(chat_id: str, model: str, content: str, reasoning_content: str = "", usage: Optional[dict] = None) -> dict:
     """创建OpenAI格式的响应对象"""
     response = {
         "id": chat_id,

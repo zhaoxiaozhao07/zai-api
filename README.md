@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **OpenAI 格式兼容**：兼容 OpenAI API 请求/响应格式，支持流式（SSE）和非流式模式
-- **多模型支持**：支持 GLM-5 系列、GLM-4.6V 视觉模型
+- **多模型支持**：支持 `glm-4.6v` 视觉模型、`glm-5` 与 `glm-4.7`
 - **插件兼容**：支持 Cline、Roo Code、Kilo Code 等第三方插件
 - **运维友好**：健康检查、CORS、代理配置、Token 认证、请求重试、可配置日志
 
@@ -57,10 +57,20 @@ client = OpenAI(
 )
 
 response = client.chat.completions.create(
-    model="GLM-5",
+    model="glm-5",
     messages=[{"role": "user", "content": "你好"}]
 )
 ```
+
+如需为 `glm-5` 或 `glm-4.7` 显式开启思考模式，可以在请求体中使用以下任一字段：
+
+- `thinking: {"type": "enabled"}`
+- `reasoning_effort`（值不为 `none`）
+- `enable_thinking: true`
+
+当多个字段同时存在时，按以下优先级解析：
+
+`thinking` > `reasoning_effort` > `enable_thinking`
 
 ## API 端点
 
@@ -71,11 +81,17 @@ response = client.chat.completions.create(
 | `/v1/chat/completions` | POST | 聊天补全（兼容 OpenAI） |
 | `/v1/models`           | GET  | 模型列表                |
 
-| 模型名称    | Z.AI 后端模型 | 说明           |
-| ----------- | ------------- | -------------- |
-| GLM-5       | glm-5         | 最新旗舰模型   |
-| GLM-5-Think | glm-5         | GLM-5 思考版本 |
-| GLM-4.6V    | glm-4.6v      | 视觉旗舰模型   |
+| 模型名称 | Z.AI 后端模型 | 说明 |
+| -------- | ------------- | ---- |
+| glm-4.6v | glm-4.6v | 视觉旗舰模型 |
+| glm-5 | glm-5 | 最新旗舰模型 |
+| glm-4.7 | glm-4.7 | 与 `glm-5` 共享同一套思考开关规则 |
+
+兼容性说明：
+
+- 公开模型名以 `/v1/models` 返回结果为准：`glm-4.6v`、`glm-5`、`glm-4.7`
+- 为兼容旧客户端，请求中仍接受 `GLM-4.6V`、`GLM-5`、`GLM-5-Think`
+- 其中 `GLM-5-Think` 在未显式传入新开关字段时，会默认按思考模式处理
 
 
 ## 参考项目

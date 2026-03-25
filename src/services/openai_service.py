@@ -39,10 +39,50 @@ class ChatCompletionService:
         self.parser = response_parser
         self.chunk = chunk_builder
 
+    def _normalize_request_model(self, request_dict: dict) -> dict:
+        """统一对外模型名，保留旧名称兼容。"""
+        model = request_dict.get("model")
+        glm_46v_aliases = {
+            settings.GLM_46V_MODEL,
+            "GLM-4.6V",
+            "glm-4.6v",
+        }
+        glm_5_aliases = {
+            settings.GLM_5_MODEL,
+            settings.GLM_5_THINKING_MODEL,
+            "glm-5",
+            "GLM-5",
+            "GLM-5-Think",
+        }
+        glm_47_aliases = {
+            "glm-4.7",
+        }
+
+        if model in glm_46v_aliases:
+            normalized_request = dict(request_dict)
+            normalized_request["_original_model"] = model
+            normalized_request["model"] = "glm-4.6v"
+            return normalized_request
+
+        if model in glm_5_aliases:
+            normalized_request = dict(request_dict)
+            normalized_request["_original_model"] = model
+            normalized_request["model"] = "glm-5"
+            return normalized_request
+
+        if model in glm_47_aliases:
+            normalized_request = dict(request_dict)
+            normalized_request["_original_model"] = model
+            normalized_request["model"] = "glm-4.7"
+            return normalized_request
+
+        return request_dict
+
     async def prepare_request(self, request: OpenAIRequest) -> Tuple[dict, dict]:
         """准备请求数据。"""
         request_dict = request.model_dump()
-        return request_dict, request_dict
+        normalized_request_dict = self._normalize_request_model(request_dict)
+        return normalized_request_dict, normalized_request_dict
 
     async def build_transformed(self, request_dict: dict, client: httpx.AsyncClient, upstream: str) -> dict:
         request_stage_log("transform_in", "开始转换请求格式: OpenAI -> Z.AI", upstream=upstream)
