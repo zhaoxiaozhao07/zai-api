@@ -17,6 +17,11 @@ API_ENDPOINT=https://chat.z.ai/api/chat/completions
 # failover: 故障转移策略，优先使用第一个地址，失败时才切换到下一个
 UPSTREAM_STRATEGY=failover
 
+# 请求配置
+MAX_RETRIES=2
+# 会话状态保留天数（默认7天）
+CONVERSATION_STATE_RETENTION_DAYS=7
+
 # 本地API的访问密钥（用于验证客户端请求）
 AUTH_TOKEN=sk-123456
 

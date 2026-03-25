@@ -158,7 +158,7 @@ class Settings(BaseSettings):
     
     # Request Configuration
     MAX_RETRIES: int = int(os.getenv("MAX_RETRIES", "3"))
-    
+
     # Proxy Configuration - 代理配置（支持多个代理）
     # 从环境变量和proxys.txt文件加载代理列表，并去重合并
     PROXY_LIST: list[str] = Field(default_factory=_get_proxy_list)

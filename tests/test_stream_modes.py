@@ -82,7 +82,7 @@ def test_non_stream(model: str = "GLM-5", messages: list = None) -> Optional[dic
         with httpx.Client(timeout=60.0) as client:
             response = client.post(url, json=payload, headers=headers)
         
-        print(f"\n✅ 响应状态码: {response.status_code}")
+        print(f"\n响应状态码: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
@@ -162,7 +162,7 @@ def test_stream(model: str = "GLM-5", messages: list = None):
         
         with httpx.Client(timeout=60.0) as client:
             with client.stream("POST", url, json=payload, headers=headers) as response:
-                print(f"✅ 响应状态码: {response.status_code}\n")
+                print(f"响应状态码: {response.status_code}\n")
                 
                 if response.status_code != 200:
                     error_text = response.read().decode('utf-8')
@@ -183,7 +183,7 @@ def test_stream(model: str = "GLM-5", messages: list = None):
                         
                         if chunk_str == "[DONE]":
                             print("\n" + "-" * 80)
-                            print("✅ 流式传输完成")
+                            print("流式传输完成")
                             break
                         
                         if not chunk_str:
@@ -204,7 +204,7 @@ def test_stream(model: str = "GLM-5", messages: list = None):
                                 # 检查完成原因
                                 finish_reason = chunk["choices"][0].get("finish_reason")
                                 if finish_reason:
-                                    print(f"\n\n✅ 完成原因: {finish_reason}")
+                                    print(f"\n\n完成原因: {finish_reason}")
                                 
                                 # 显示使用情况
                                 if "usage" in chunk:
@@ -247,7 +247,7 @@ def test_health_check():
         
         if response.status_code == 200:
             data = response.json()
-            print(f"✅ 服务状态: {data.get('status', 'unknown')}")
+            print(f"服务状态: {data.get('status', 'unknown')}")
             return True
         else:
             print(f"❌ 健康检查失败: {response.status_code}")
@@ -275,7 +275,7 @@ def test_models_list():
         if response.status_code == 200:
             data = response.json()
             models = data.get("data", [])
-            print(f"✅ 可用模型数量: {len(models)}")
+            print(f"可用模型数量: {len(models)}")
             print("\n📋 模型列表:")
             for model in models:
                 print(f"  - {model.get('id')} (owned by: {model.get('owned_by')})")
@@ -323,7 +323,7 @@ def main():
     
     # 总结
     print_section("测试完成")
-    print("✅ 所有测试已完成！")
+    print("所有测试已完成！")
     print("\n💡 提示:")
     print("  - 非流式模式: 一次性返回完整响应")
     print("  - 流式模式: 实时逐字返回响应内容")

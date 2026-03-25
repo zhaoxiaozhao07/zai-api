@@ -278,7 +278,7 @@ def perf_timer(operation_name: str, log_result: bool = True, threshold_ms: float
         
         if log_result and elapsed_ms >= threshold_ms:
             debug_log(
-                f"⏱️ {operation_name}",
+                f"{operation_name}",
                 elapsed_ms=f"{elapsed_ms:.2f}ms",
                 elapsed_s=f"{elapsed_s:.4f}s"
             )

@@ -77,6 +77,7 @@ class TokenPool:
         self.tokens: List[str] = []
         self.current_index: int = 0
         self.current_token: Optional[str] = None
+        self._allocation_index: int = -1
 
         # Token轮询锁 - 防止并发切换导致的竞态条件
         self._switch_lock = asyncio.Lock()
@@ -170,6 +171,31 @@ class TokenPool:
 
         # 所有Token都不可用
         raise ValueError("[ERROR] 无法获取任何可用的Token，请检查配置或网络连接")
+
+    async def get_token_for_new_session(self) -> str:
+        """为新会话分配一个可用 Token（轮询）。"""
+        async with self._switch_lock:
+            if not self.tokens:
+                raise ValueError("[ERROR] 未配置任何可用的Token")
+
+            start_index = 0 if self._allocation_index < 0 else (self._allocation_index + 1) % len(self.tokens)
+            attempts = 0
+
+            while attempts < len(self.tokens):
+                index = (start_index + attempts) % len(self.tokens)
+                candidate = self.tokens[index]
+                status = self.token_statuses.get(candidate)
+
+                if status and status.is_available:
+                    self._allocation_index = index
+                    self.current_index = index
+                    self.current_token = candidate
+                    debug_log("[TOKEN] 为新会话分配Token", index=index, total=len(self.tokens))
+                    return candidate
+
+                attempts += 1
+
+        raise ValueError("[ERROR] 无法为新会话分配任何可用Token")
     
     
     async def switch_to_next(self) -> Optional[str]:

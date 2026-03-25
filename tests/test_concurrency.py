@@ -262,7 +262,7 @@ async def run_concurrent_requests(
         
         total_duration = time.time() - total_start
         
-        print(f"\n✅ 并发测试完成！总耗时: {total_duration:.2f}秒")
+        print(f"\n并发测试完成！总耗时: {total_duration:.2f}秒")
         
         return processed_results
 
@@ -341,7 +341,7 @@ def print_analysis(analysis: Dict[str, Any], test_name: str = "测试"):
     print(f"   失败数: {analysis['failed_requests']} ❌")
     print(f"   成功率: {analysis['success_rate']:.2f}%")
     
-    print(f"\n⏱️  响应时间统计:")
+    print(f"\n响应时间统计:")
     print(f"   平均响应时间: {analysis['avg_duration']:.3f}秒")
     print(f"   中位数响应时间: {analysis['median_duration']:.3f}秒")
     print(f"   最快响应: {analysis['min_duration']:.3f}秒")
@@ -518,7 +518,7 @@ async def main():
     if not await test_health_check():
         print("❌ 服务未运行或无法访问，请先启动服务！")
         sys.exit(1)
-    print("✅ 服务运行正常")
+    print("服务运行正常")
     
     all_tests = []
     
@@ -544,7 +544,7 @@ async def main():
         print_summary(all_tests)
         
         print(f"\n⏰ 测试结束时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("\n✅ 所有测试完成！")
+        print("\n所有测试完成！")
         
         print("\n💡 建议:")
         print("   1. 观察不同并发级别下的性能变化")

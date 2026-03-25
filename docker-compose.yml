@@ -12,6 +12,8 @@ services:
     env_file:
       - .env
     volumes:
+      # 持久化会话状态目录，首次启动时由应用在目录内自动创建 JSON 文件
+      - ./data:/app/data
       # 挂载 tokens.txt 文件（如果需要从文件读取 token）
       - ./tokens.txt:/app/tokens.txt:ro
       # 挂载 proxys.txt 文件（如果需要从文件读取代理）

@@ -23,4 +23,4 @@ with httpx.Client(proxy=proxy, timeout=10) as proxy_client:
 if direct_ip == proxy_ip:
     print("❌ 未走代理（出口 IP 相同）")
 else:
-    print("✅ 已通过代理出网")
+    print("已通过代理出网")

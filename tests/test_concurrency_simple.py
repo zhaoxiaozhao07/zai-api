@@ -121,7 +121,7 @@ async def main():
             if response.status_code != 200:
                 print("❌ 服务未运行，请先启动服务！")
                 return
-        print("✅ 服务运行正常\n")
+        print("服务运行正常\n")
     except Exception as e:
         print(f"❌ 无法连接到服务: {e}")
         return
@@ -131,7 +131,7 @@ async def main():
     await test_concurrent(num_requests=10, concurrency=5)  # 低并发
     await test_concurrent(num_requests=20, concurrency=10) # 中并发
     
-    print("✅ 所有测试完成！\n")
+    print("所有测试完成！\n")
 
 
 if __name__ == "__main__":

@@ -105,7 +105,7 @@ class HeaderManager:
             base_headers["Connection"] = "keep-alive"
             
             self._header_template_cache = base_headers
-            info_log("✅ Header模板已缓存", 
+            info_log(" Header模板已缓存", 
                      user_agent=base_headers.get("User-Agent", "")[:50],
                      has_sec_ch_ua=("sec-ch-ua" in base_headers or "Sec-Ch-Ua" in base_headers))
         

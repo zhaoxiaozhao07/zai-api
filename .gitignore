@@ -63,3 +63,6 @@ debug/
 *.json
 *.jsonl
 temp-response-store/logs/
+zai/
+temp-response-store/
+data/conversation_state.json

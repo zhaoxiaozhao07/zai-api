@@ -24,6 +24,7 @@ from ..schemas import OpenAIRequest
 from ..config import settings
 from ..zai_transformer import ZAITransformer
 from ..token_pool import get_token_pool
+from ..conversation_state import conversation_state
 from .network_manager import network_manager
 from .response_parser import response_parser
 from .chunk_builder import chunk_builder
@@ -68,6 +69,29 @@ class ChatCompletionService:
         api_key = authorization[7:]
         if api_key != settings.AUTH_TOKEN:
             raise HTTPException(status_code=401, detail="Invalid API key")
+
+    def _store_conversation_success(
+        self,
+        request_dict_for_transform: dict,
+        transformed: dict,
+        assistant_message: Dict[str, str],
+    ) -> None:
+        try:
+            conversation_state.store_next_turn(
+                model=request_dict_for_transform.get("model", ""),
+                request_messages=request_dict_for_transform.get("messages", []),
+                assistant_message=assistant_message,
+                chat_id=transformed["body"]["chat_id"],
+                token=transformed.get("token", ""),
+                last_request_id=transformed["body"]["id"],
+            )
+        except Exception as exc:  # pragma: no cover - 缓存失败不影响主流程
+            debug_log("[CONVERSATION] 会话状态写入失败", error=str(exc))
+
+    def _invalidate_transformed_conversation(self, transformed: dict) -> None:
+        chat_id = transformed.get("body", {}).get("chat_id")
+        if chat_id:
+            conversation_state.invalidate_chat(chat_id)
 
     async def handle_non_stream_request(
         self,
@@ -124,7 +148,7 @@ class ChatCompletionService:
                     headers=headers,
                 ) as response:
                     ttfb = (time.perf_counter() - request_start_time) * 1000
-                    debug_log("⏱️ 非流式上游TTFB", ttfb_ms=f"{ttfb:.2f}ms")
+                    debug_log("非流式上游TTFB", ttfb_ms=f"{ttfb:.2f}ms")
 
                     if response.status_code != 200:
                         last_status_code = response.status_code
@@ -192,7 +216,7 @@ class ChatCompletionService:
                                         else maybe_err.get("message")
                                     ) or "上游返回错误"
                                     raise HTTPException(status_code=500, detail=msg)
-                            except (json.JSONDecodeError, HTTPException):
+                            except json.JSONDecodeError:
                                 pass
                             continue
 
@@ -212,6 +236,12 @@ class ChatCompletionService:
                         phase = data.get("phase")
                         delta_content = data.get("delta_content", "")
                         edit_content = data.get("edit_content", "")
+                        error_info = data.get("error")
+
+                        if error_info:
+                            error_detail = error_info.get("detail") or error_info.get("content") or "Unknown error"
+                            error_log("[UPSTREAM_ERROR] 上游返回错误", error_detail=error_detail)
+                            raise HTTPException(status_code=502, detail=f"Upstream error: {error_detail}")
 
                         # 收集 usage 信息
                         if data.get("usage"):
@@ -348,6 +378,12 @@ class ChatCompletionService:
                     if thinking_content and is_thinking_model:
                         message["reasoning_content"] = thinking_content
 
+                    self._store_conversation_success(
+                        request_dict_for_transform=request_dict_for_transform,
+                        transformed=transformed,
+                        assistant_message=message,
+                    )
+
                     return {
                         "id": transformed["body"]["chat_id"],
                         "object": "chat.completion",
@@ -438,7 +474,7 @@ class ChatCompletionService:
                     headers=headers,
                 ) as response:
                     ttfb = (time.perf_counter() - request_start_time) * 1000
-                    debug_log("⏱️ 上游TTFB (首字节时间)", ttfb_ms=f"{ttfb:.2f}ms")
+                    debug_log("上游TTFB (首字节时间)", ttfb_ms=f"{ttfb:.2f}ms")
 
                     if response.status_code != 200:
                         error_text = await response.aread()
@@ -787,6 +823,21 @@ class ChatCompletionService:
 
                         # 检查是否为 done 状态
                         if is_done:
+                            assistant_message = {
+                                "role": "assistant",
+                                "content": answer_accumulator.strip(),
+                            }
+                            if is_thinking_model:
+                                reasoning_content = self.parser.clean_thinking(thinking_accumulator).strip()
+                                if reasoning_content:
+                                    assistant_message["reasoning_content"] = reasoning_content
+
+                            self._store_conversation_success(
+                                request_dict_for_transform=request_dict_for_transform,
+                                transformed=transformed,
+                                assistant_message=assistant_message,
+                            )
+
                             # 1. 发送带 usage 的 finish chunk
                             finish_chunk = self.chunk.build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
                             yield finish_chunk
@@ -800,6 +851,21 @@ class ChatCompletionService:
                             return
 
                     # 流正常结束，发送 finish chunk 和 usage chunk
+                    assistant_message = {
+                        "role": "assistant",
+                        "content": answer_accumulator.strip(),
+                    }
+                    if is_thinking_model:
+                        reasoning_content = self.parser.clean_thinking(thinking_accumulator).strip()
+                        if reasoning_content:
+                            assistant_message["reasoning_content"] = reasoning_content
+
+                    self._store_conversation_success(
+                        request_dict_for_transform=request_dict_for_transform,
+                        transformed=transformed,
+                        assistant_message=assistant_message,
+                    )
+
                     finish_chunk = self.chunk.build_finish_chunk(json_lib, transformed, request, usage=latest_usage)
                     yield finish_chunk
                     if latest_usage:
@@ -863,6 +929,7 @@ class ChatCompletionService:
         # 标记Token失败并切换
         if current_token:
             token_pool.mark_token_failure(current_token)
+        self._invalidate_transformed_conversation(transformed)
         info_log(f"[CONFIG] 配置Token错误 {status_code}，切换Token")
 
         await self.transformer.switch_token()

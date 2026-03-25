@@ -10,6 +10,8 @@ import time
 import random
 from typing import Dict, Any, Tuple, List, Optional
 from functools import lru_cache
+from urllib.parse import urlsplit
+import httpx
 from fastuuid import uuid4
 from dateutil import tz
 from datetime import datetime
@@ -22,6 +24,7 @@ from .token_pool import get_token_pool
 from .image_handler import process_image_content
 from .header_manager import header_manager
 from .message_processor import message_processor
+from .conversation_state import conversation_state
 
 
 
@@ -74,7 +77,12 @@ class ZAITransformer:
         # 初始化签名生成器
         self.signature_generator = SignatureGenerator()
 
-    async def get_token(self, http_client=None) -> str:
+    async def get_token(
+        self,
+        http_client=None,
+        preferred_token: Optional[str] = None,
+        rotate_for_new_session: bool = False,
+    ) -> str:
         """
         获取Z.AI认证令牌（从token池获取）
 
@@ -85,7 +93,12 @@ class ZAITransformer:
             str: 可用的Token
         """
         token_pool = await get_token_pool()
-        token = await token_pool.get_token(http_client=http_client)
+        if preferred_token:
+            token = preferred_token
+        elif rotate_for_new_session:
+            token = await token_pool.get_token_for_new_session()
+        else:
+            token = await token_pool.get_token(http_client=http_client)
 
         token_preview = f"{token[:20]}...{token[-20:]}" if len(token) > 40 else token
         debug_log(f"使用token池中的令牌 (池大小: {token_pool.get_pool_size()}): {token_preview}")
@@ -233,8 +246,133 @@ class ZAITransformer:
                 break
         return user_content
 
+    def _resolve_base_url(self, upstream_url: Optional[str] = None) -> str:
+        """从 completions 地址解析出站点根地址。"""
+        if upstream_url:
+            target_url = upstream_url
+        elif settings.API_ENDPOINT:
+            target_url = settings.API_ENDPOINT
+        else:
+            target_url = f"{self.base_url}/api/v2/chat/completions"
+        parsed = urlsplit(target_url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return self.base_url
+
+    def _extract_user_name(self, token: str) -> str:
+        """从 JWT 中提取展示用户名，失败时返回 Guest。"""
+        payload = decode_jwt_payload(token) if token else {}
+
+        name = payload.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+
+        email = payload.get("email")
+        if isinstance(email, str) and email.strip():
+            return email.split("@", 1)[0].strip() or "Guest"
+
+        return "Guest"
+
+    async def _create_upstream_chat(
+        self,
+        client,
+        token: str,
+        model: str,
+        user_message: str,
+        upstream_url: Optional[str] = None,
+    ) -> str:
+        """在调用 chat/completions 前先创建服务端 chat。"""
+        if client is None:
+            raise HTTPException(status_code=500, detail="缺少 HTTP 客户端，无法创建上游 chat")
+
+        init_content = (user_message or "").strip() or "..."
+        if len(init_content) > 500:
+            init_content = init_content[:500] + "..."
+
+        message_id = generate_uuid()
+        timestamp_s = int(time.time())
+        body = {
+            "chat": {
+                "id": "",
+                "title": "新聊天",
+                "models": [model],
+                "params": {},
+                "history": {
+                    "messages": {
+                        message_id: {
+                            "id": message_id,
+                            "parentId": None,
+                            "childrenIds": [],
+                            "role": "user",
+                            "content": init_content,
+                            "timestamp": timestamp_s,
+                            "models": [model],
+                        }
+                    },
+                    "currentId": message_id,
+                },
+                "tags": [],
+                "flags": [],
+                "features": [
+                    {
+                        "type": "tool_selector",
+                        "server": "tool_selector_h",
+                        "status": "hidden",
+                    }
+                ],
+                "mcp_servers": [],
+                "enable_thinking": True,
+                "auto_web_search": False,
+                "message_version": 1,
+                "extra": {},
+                "timestamp": int(time.time() * 1000),
+            }
+        }
+
+        dynamic_headers = await header_manager.get_dynamic_headers()
+        headers = {
+            **dynamic_headers,
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+        }
+
+        create_chat_url = f"{self._resolve_base_url(upstream_url)}/api/v1/chats/new"
+        response = None
+        last_exception: Optional[Exception] = None
+        for attempt in range(1, 4):
+            try:
+                response = await client.post(create_chat_url, headers=headers, json=body)
+                break
+            except httpx.HTTPError as exc:
+                last_exception = exc
+                if attempt >= 3:
+                    raise HTTPException(status_code=502, detail=f"Create upstream chat failed: {exc.__class__.__name__}") from exc
+                await asyncio.sleep(min(0.5 * attempt, 1.5))
+
+        if response is None:
+            raise HTTPException(status_code=502, detail=f"Create upstream chat failed: {type(last_exception).__name__ if last_exception else 'unknown'}")
+
+        if response.status_code != 200:
+            error_body = response.text[:500]
+            error_log(
+                "创建上游 chat 失败",
+                status_code=response.status_code,
+                error_detail=error_body,
+            )
+            raise HTTPException(
+                status_code=response.status_code,
+                detail=f"Create upstream chat failed: {error_body}",
+            )
+
+        chat_data = response.json()
+        chat_id = chat_data.get("id") or chat_data.get("chat", {}).get("id")
+        if not isinstance(chat_id, str) or not chat_id.strip():
+            raise HTTPException(status_code=502, detail="上游 chat 创建成功但未返回 chat_id")
+
+        return chat_id
+
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
-    async def transform_request_in(self, request: Dict[str, Any], client=None, upstream_url: str = None) -> Dict[str, Any]:
+    async def transform_request_in(self, request: Dict[str, Any], client=None, upstream_url: Optional[str] = None) -> Dict[str, Any]:
         """
         转换OpenAI请求为z.ai格式
 
@@ -248,16 +386,42 @@ class ZAITransformer:
         """
         info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', settings.GLM_5_MODEL)} -> Z.AI")
 
-        # 获取认证令牌
-        token = await self.get_token(http_client=client)
-
-        messages = request.get("messages", [])
-
         # 确定请求的模型特性
         requested_model = request.get("model", settings.GLM_5_MODEL)
+        original_messages = request.get("messages", [])
+        history_key, cached_session = conversation_state.resolve_session(requested_model, original_messages)
+        has_prior_history = len(original_messages) > 1
+
+        if cached_session:
+            token = await self.get_token(http_client=client, preferred_token=cached_session.token)
+            parent_request_id = cached_session.last_request_id
+            chat_id = cached_session.chat_id
+            source_messages = original_messages[-1:] if original_messages else []
+            info_log(
+                "[CONVERSATION] 命中会话缓存，复用上游 chat_id",
+                chat_id=chat_id,
+                history_key=history_key,
+            )
+        else:
+            token = await self.get_token(http_client=client, rotate_for_new_session=True)
+            parent_request_id = None
+            chat_id = None
+            if has_prior_history:
+                bootstrap_content = conversation_state.build_bootstrap_content(original_messages)
+                source_messages = [{"role": "user", "content": bootstrap_content}]
+                info_log(
+                    "[CONVERSATION] 未命中会话缓存，使用历史bootstrap创建新会话",
+                    history_key=history_key,
+                    history_messages=len(original_messages) - 1,
+                )
+            else:
+                source_messages = original_messages
+
+        messages = source_messages
+
         is_thinking = (requested_model == settings.GLM_5_THINKING_MODEL or
-                      requested_model == settings.GLM_46V_MODEL or  # GLM-4.6V 视觉模型也是 thinking 模型
-                      request.get("reasoning", False))
+                       requested_model == settings.GLM_46V_MODEL or  # GLM-4.6V 视觉模型也是 thinking 模型
+                       request.get("reasoning", False))
         is_vision_model = (requested_model == settings.GLM_46V_MODEL)
         is_simplified_model = (requested_model == settings.GLM_5_MODEL or
                                requested_model == settings.GLM_5_THINKING_MODEL)
@@ -267,9 +431,9 @@ class ZAITransformer:
         debug_log(f"  模型映射: {requested_model} -> {upstream_model_id}")
 
         # 处理消息列表并提取图像
-        debug_log(f"  开始处理 {len(request.get('messages', []))} 条消息")
+        debug_log(f"开始处理 {len(messages)} 条消息")
         with perf_timer("process_messages", threshold_ms=5):
-            messages, image_urls = self._process_messages(request.get("messages", []), is_vision_model=is_vision_model)
+            messages, image_urls = self._process_messages(messages, is_vision_model=is_vision_model)
 
         # 构建MCP服务器列表
         mcp_servers = []
@@ -332,8 +496,19 @@ class ZAITransformer:
                                 file_info["ref_user_msg_id"] = current_user_message_id
                                 files_list.append(file_info)
             
-        # 构建上游请求体
-        chat_id = generate_uuid()
+        # 提取最后一条用户消息内容（用于创建chat、签名和请求体）
+        with perf_timer("extract_user_content", threshold_ms=5):
+            user_content = message_processor.extract_last_user_content(messages)
+
+        if not chat_id:
+            # 首次会话或缓存未命中时创建服务端 chat
+            chat_id = await self._create_upstream_chat(
+                client=client,
+                token=token,
+                model=upstream_model_id,
+                user_message=user_content,
+                upstream_url=upstream_url,
+            )
 
         # 根据模型类型构建 features 和 background_tasks
         if is_vision_model:
@@ -371,7 +546,7 @@ class ZAITransformer:
             "background_tasks": background_tasks,
             "mcp_servers": mcp_servers,
             "variables": {
-                "{{USER_NAME}}": "Guest",
+                "{{USER_NAME}}": self._extract_user_name(token),
                 "{{USER_LOCATION}}": "Unknown",
                 # 使用优化后的时间变量生成函数（一次调用，避免重复）
                 **generate_time_variables("Asia/Shanghai"),
@@ -383,7 +558,7 @@ class ZAITransformer:
 
         # 所有保留的模型都需要 current_user_message_id/parent_id（不再使用 model_item）
         body["current_user_message_id"] = current_user_message_id or generate_uuid()
-        body["current_user_message_parent_id"] = None
+        body["current_user_message_parent_id"] = parent_request_id
         
         # 如果有上传的文件，添加到body中
         if files_list:
@@ -395,10 +570,6 @@ class ZAITransformer:
         # 生成时间戳和请求ID
         timestamp = int(time.time() * 1000)
         request_id = generate_uuid()
-        
-        # 提取最后一条用户消息内容（用于签名和请求体）
-        with perf_timer("extract_user_content", threshold_ms=5):
-            user_content = message_processor.extract_last_user_content(messages)
         
         # 将用户内容添加到请求体中（新要求）
         body["signature_prompt"] = user_content
@@ -432,13 +603,13 @@ class ZAITransformer:
             dynamic_headers["X-Signature"] = signature
             query_params["signature_timestamp"] = str(timestamp)
 
-            debug_log("  Z.AI签名已生成并添加到请求中")
+            debug_log("Z.AI签名已生成并添加到请求中")
         except Exception as e:
             error_log(f"生成Z.AI签名失败: {e}")
 
         # 使用传入的上游URL或默认配置
         api_url = upstream_url if upstream_url else settings.API_ENDPOINT
-        debug_log(f"  使用上游地址: {api_url}")
+        debug_log(f"使用上游地址: {api_url}")
 
         # 构建完整的URL
         url_with_params = f"{api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
@@ -463,4 +634,8 @@ class ZAITransformer:
             "token": token,
             "is_thinking": is_thinking,  # 标记是否为thinking模型，响应处理时用于判断是否输出reasoning_content
             "is_vision_model": is_vision_model,  # 标记是否为V系列视觉模型（GLM-4.6V），用于区分多阶段思考格式
+            "conversation": {
+                "history_key": history_key,
+                "cache_hit": cached_session is not None,
+            },
         }
