@@ -28,9 +28,11 @@ from .conversation_state import conversation_state
 
 PUBLIC_GLM_46V_MODEL = "glm-4.6v"
 PUBLIC_GLM_5_MODEL = "glm-5"
+PUBLIC_GLM_5_TURBO_MODEL = "glm-5-turbo"
 PUBLIC_GLM_47_MODEL = "glm-4.7"
 LEGACY_GLM_46V_ALIASES = frozenset({"GLM-4.6V"})
 LEGACY_GLM_5_ALIASES = frozenset({"GLM-5", "GLM-5-Think"})
+LEGACY_GLM_5_TURBO_ALIASES = frozenset({"GLM-5-Turbo"})
 
 
 
@@ -389,9 +391,12 @@ class ZAITransformer:
             return False
         return model in {
             PUBLIC_GLM_5_MODEL,
+            PUBLIC_GLM_5_TURBO_MODEL,
             settings.GLM_5_MODEL,
             settings.GLM_5_THINKING_MODEL,
+            settings.GLM_5_TURBO_MODEL,
             *LEGACY_GLM_5_ALIASES,
+            *LEGACY_GLM_5_TURBO_ALIASES,
         }
 
     def _is_glm_47_model(self, model: Any) -> bool:
@@ -404,6 +409,12 @@ class ZAITransformer:
         normalized_model = model.strip()
         if self._is_glm_46v_model(normalized_model):
             return PUBLIC_GLM_46V_MODEL
+        if normalized_model in {
+            PUBLIC_GLM_5_TURBO_MODEL,
+            settings.GLM_5_TURBO_MODEL,
+            *LEGACY_GLM_5_TURBO_ALIASES,
+        }:
+            return PUBLIC_GLM_5_TURBO_MODEL
         if self._is_glm_5_family_model(normalized_model):
             return PUBLIC_GLM_5_MODEL
         if self._is_glm_47_model(normalized_model):
@@ -425,7 +436,17 @@ class ZAITransformer:
             return request.get("enable_thinking") is True
 
         original_model = request.get("_original_model")
-        if original_model in {settings.GLM_5_THINKING_MODEL, "GLM-5-Think"}:
+        if original_model in {
+            settings.GLM_5_THINKING_MODEL,
+            settings.GLM_5_TURBO_MODEL,
+            "GLM-5-Think",
+            "GLM-5-Turbo",
+            PUBLIC_GLM_5_TURBO_MODEL,
+        }:
+            return True
+
+        normalized_model = self._normalize_requested_model(request.get("model"))
+        if normalized_model == PUBLIC_GLM_5_TURBO_MODEL:
             return True
 
         return False
@@ -480,17 +501,20 @@ class ZAITransformer:
 
         is_vision_model = requested_model == PUBLIC_GLM_46V_MODEL
         is_glm_5_model = requested_model == PUBLIC_GLM_5_MODEL
+        is_glm_5_turbo_model = requested_model == PUBLIC_GLM_5_TURBO_MODEL
         is_glm_47_model = requested_model == PUBLIC_GLM_47_MODEL
         is_thinking = is_vision_model
-        if is_glm_5_model or is_glm_47_model:
+        if is_glm_5_model or is_glm_5_turbo_model or is_glm_47_model:
             is_thinking = self._resolve_glm_5_thinking(request)
-        is_simplified_model = is_glm_5_model or is_glm_47_model
+        is_simplified_model = is_glm_5_model or is_glm_5_turbo_model or is_glm_47_model
 
         # 获取上游模型ID
         if is_vision_model:
             upstream_model_id = PUBLIC_GLM_46V_MODEL
         elif is_glm_47_model:
             upstream_model_id = PUBLIC_GLM_47_MODEL
+        elif is_glm_5_turbo_model:
+            upstream_model_id = "GLM-5-Turbo"
         elif is_glm_5_model:
             upstream_model_id = PUBLIC_GLM_5_MODEL
         else:

@@ -49,6 +49,7 @@ logger = get_logger("openai_api")
 
 PUBLIC_GLM_46V_MODEL = "glm-4.6v"
 PUBLIC_GLM_5_MODEL = "glm-5"
+PUBLIC_GLM_5_TURBO_MODEL = "glm-5-turbo"
 PUBLIC_GLM_47_MODEL = "glm-4.7"
 
 service = chat_completion_service
@@ -62,6 +63,7 @@ async def list_models():
         data=[
             Model(id=PUBLIC_GLM_46V_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=PUBLIC_GLM_5_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=PUBLIC_GLM_5_TURBO_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=PUBLIC_GLM_47_MODEL, created=current_time, owned_by="z.ai"),
         ]
     )

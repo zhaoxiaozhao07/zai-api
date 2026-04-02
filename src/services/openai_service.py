@@ -54,6 +54,11 @@ class ChatCompletionService:
             "GLM-5",
             "GLM-5-Think",
         }
+        glm_5_turbo_aliases = {
+            settings.GLM_5_TURBO_MODEL,
+            "glm-5-turbo",
+            "GLM-5-Turbo",
+        }
         glm_47_aliases = {
             "glm-4.7",
         }
@@ -68,6 +73,13 @@ class ChatCompletionService:
             normalized_request = dict(request_dict)
             normalized_request["_original_model"] = model
             normalized_request["model"] = "glm-5"
+            return normalized_request
+
+        if model in glm_5_turbo_aliases:
+            normalized_request = dict(request_dict)
+            normalized_request["_original_model"] = model
+            normalized_request["model"] = "glm-5-turbo"
+            normalized_request["enable_thinking"] = True
             return normalized_request
 
         if model in glm_47_aliases:
