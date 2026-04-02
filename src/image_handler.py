@@ -6,12 +6,25 @@
 """
 
 import base64
+import hashlib
 import mimetypes
-import httpx
-from typing import Dict, Any, Optional, Tuple
+import uuid
 from io import BytesIO
+from typing import Dict, Any, Optional, Tuple
+
+import httpx
 
 from .helpers import error_log, info_log, debug_log
+
+
+MINIMAL_FILE_META_KEYS = (
+    "id",
+    "filename",
+    "content_type",
+    "mimetype",
+    "extension",
+    "meta",
+)
 
 
 def is_base64_image(url: str) -> bool:
@@ -25,6 +38,7 @@ def is_base64_image(url: str) -> bool:
         是否是base64图像
     """
     return url.startswith("data:image/")
+
 
 
 def decode_base64_image(base64_str: str) -> Tuple[bytes, str, str]:
@@ -122,6 +136,35 @@ async def download_image_from_url(url: str, http_client: Optional[httpx.AsyncCli
         raise
 
 
+async def fetch_image_bytes_and_meta(
+    image_url: str,
+    client: Optional[httpx.AsyncClient] = None,
+) -> Tuple[bytes, str, str, str]:
+    """统一获取图片字节、内容类型、扩展名和文件名。"""
+    if is_base64_image(image_url):
+        debug_log("检测到base64编码图像")
+        image_bytes, content_type, extension = decode_base64_image(image_url)
+        filename = f"image.{extension}"
+        return image_bytes, content_type, extension, filename
+
+    debug_log("检测到URL图像", url=image_url[:100])
+    image_bytes, content_type, extension = await download_image_from_url(image_url, http_client=client)
+    from urllib.parse import urlparse
+
+    parsed_url = urlparse(image_url)
+    path_parts = parsed_url.path.split("/")
+    filename = path_parts[-1] if path_parts[-1] else f"image.{extension}"
+    if not filename.endswith(f".{extension}"):
+        filename = f"{filename}.{extension}"
+    return image_bytes, content_type, extension, filename
+
+
+
+def compute_image_asset_key(image_bytes: bytes) -> str:
+    """基于图片实际二进制计算稳定哈希，用于同会话内复用。"""
+    return hashlib.sha256(image_bytes).hexdigest()
+
+
 async def upload_image_to_zai(
     image_bytes: bytes,
     filename: str,
@@ -182,6 +225,28 @@ async def upload_image_to_zai(
         raise
 
 
+
+def build_minimal_file_data(
+    file_id: str,
+    name: str = "image",
+    size: int = 0,
+    content_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """根据轻量持久化元数据重建最小可用 file_data。"""
+    normalized_content_type = content_type or "image/png"
+    return {
+        "id": file_id,
+        "filename": name or "image",
+        "content_type": normalized_content_type,
+        "mimetype": normalized_content_type,
+        "extension": ((name.rsplit(".", 1)[-1] if "." in name else "png") or "png"),
+        "meta": {
+            "size": int(size or 0),
+        },
+    }
+
+
+
 def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     格式化文件数据为Z.AI请求格式
@@ -192,7 +257,6 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         格式化后的文件对象
     """
-    import uuid
     return {
         "type": "image",
         "file": file_data,
@@ -202,10 +266,41 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
         "status": "uploaded",
         "size": file_data.get("meta", {}).get("size", 0),
         "error": "",
-        "itemId": str(uuid.uuid4()),  # 使用独立的UUID
+        "itemId": str(uuid.uuid4()),
         "media": "image"
         # ref_user_msg_id 将在 zai_transformer.py 中添加
     }
+
+
+
+def minimal_file_data_from_uploaded(file_data: Dict[str, Any]) -> Dict[str, Any]:
+    """裁剪上传返回的 file_data，仅保留后续复用所需最小字段。"""
+    minimal: Dict[str, Any] = {}
+    for key in MINIMAL_FILE_META_KEYS:
+        if key in file_data:
+            minimal[key] = file_data[key]
+    if "meta" not in minimal or not isinstance(minimal.get("meta"), dict):
+        minimal["meta"] = {"size": 0}
+    return minimal
+
+
+
+def build_reusable_file_payload(asset: Dict[str, Any], ref_user_msg_id: Optional[str] = None) -> Dict[str, Any]:
+    """根据会话缓存中的图片资产重建当前请求所需的 file payload。"""
+    raw_file_data = asset.get("file_data") if isinstance(asset.get("file_data"), dict) else None
+    if raw_file_data:
+        file_data = raw_file_data
+    else:
+        file_data = build_minimal_file_data(
+            file_id=str(asset.get("file_id") or ""),
+            name=str(asset.get("name") or "image"),
+            size=int(asset.get("size") or 0),
+        )
+
+    payload = format_file_for_zai_request(file_data)
+    if ref_user_msg_id:
+        payload["ref_user_msg_id"] = ref_user_msg_id
+    return payload
 
 
 async def process_image_content(
@@ -225,23 +320,7 @@ async def process_image_content(
         格式化后的文件对象，如果处理失败则返回None
     """
     try:
-        # 判断是base64还是URL
-        if is_base64_image(image_url):
-            debug_log("检测到base64编码图像")
-            image_bytes, content_type, extension = decode_base64_image(image_url)
-            filename = f"image.{extension}"
-        else:
-            debug_log("检测到URL图像", url=image_url[:100])
-            # 复用HTTP客户端,避免重复创建连接
-            image_bytes, content_type, extension = await download_image_from_url(image_url, http_client=client)
-            # 从URL提取文件名
-            from urllib.parse import urlparse
-            parsed_url = urlparse(image_url)
-            path_parts = parsed_url.path.split("/")
-            filename = path_parts[-1] if path_parts[-1] else f"image.{extension}"
-            # 确保文件名有正确的扩展名
-            if not filename.endswith(f".{extension}"):
-                filename = f"{filename}.{extension}"
+        image_bytes, content_type, extension, filename = await fetch_image_bytes_and_meta(image_url, client)
         
         # 上传到Z.AI
         file_data = await upload_image_to_zai(
@@ -258,4 +337,3 @@ async def process_image_content(
     except Exception as e:
         error_log(f"处理图像内容失败: {e}", image_url=image_url[:100])
         return None
-

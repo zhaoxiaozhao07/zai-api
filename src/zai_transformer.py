@@ -21,20 +21,26 @@ from .config import settings
 from .helpers import error_log, info_log, debug_log, perf_timer, perf_track, get_timezone
 from .signature import SignatureGenerator, decode_jwt_payload
 from .token_pool import get_token_pool
-from .image_handler import process_image_content
+from .image_handler import (
+    process_image_content,
+    fetch_image_bytes_and_meta,
+    compute_image_asset_key,
+    minimal_file_data_from_uploaded,
+    build_reusable_file_payload,
+)
 from .header_manager import header_manager
 from .message_processor import message_processor
 from .conversation_state import conversation_state
 
 PUBLIC_GLM_46V_MODEL = "glm-4.6v"
+PUBLIC_GLM_5V_TURBO_MODEL = "glm-5v-turbo"
 PUBLIC_GLM_5_MODEL = "glm-5"
 PUBLIC_GLM_5_TURBO_MODEL = "glm-5-turbo"
 PUBLIC_GLM_47_MODEL = "glm-4.7"
 LEGACY_GLM_46V_ALIASES = frozenset({"GLM-4.6V"})
+LEGACY_GLM_5V_TURBO_ALIASES = frozenset({"GLM-5v-Turbo"})
 LEGACY_GLM_5_ALIASES = frozenset({"GLM-5", "GLM-5-Think"})
 LEGACY_GLM_5_TURBO_ALIASES = frozenset({"GLM-5-Turbo"})
-
-
 
 
 
@@ -62,6 +68,7 @@ def generate_time_variables(timezone_name: str = "Asia/Shanghai") -> Dict[str, s
         "{{CURRENT_TIMEZONE}}": timezone_name,
         "{{USER_LANGUAGE}}": "zh-CN",
     }
+
 
 
 def generate_uuid() -> str:
@@ -135,121 +142,6 @@ class ZAITransformer:
         """刷新header模板（清除缓存并重新生成）"""
         await header_manager.clear_header_template()
         info_log("🔄 Header模板已刷新，下次请求将使用新的header")
-    
-    def _has_image_content(self, messages: List[Dict]) -> bool:
-        """
-        检测消息中是否包含图像
-        
-        Args:
-            messages: 消息列表
-            
-        Returns:
-            bool: 如果消息中包含图像内容则返回True
-        """
-        for msg in messages:
-            if msg.get("role") == "user":
-                content = msg.get("content")
-                if isinstance(content, list):
-                    for part in content:
-                        if (part.get("type") == "image_url" and
-                            part.get("image_url", {}).get("url")):
-                            return True
-        return False
-    
-    def _process_messages(self, messages: list, is_vision_model: bool = False) -> Tuple[list, list]:
-        """
-        处理消息列表，转换system角色和提取图片内容
-        
-        Args:
-            messages: 原始消息列表
-            is_vision_model: 是否是视觉模型（GLM-4.6V），视觉模型保留图片在messages中
-            
-        Returns:
-            (处理后的消息列表, 图片URL列表)
-        """
-        processed_messages = []
-        image_urls = []
-        
-        for idx, orig_msg in enumerate(messages):
-            # 惰性拷贝：仅在需要修改时才拷贝
-            msg = orig_msg
-            needs_copy = False
-
-            # 处理system角色转换
-            if orig_msg.get("role") == "system":
-                msg = orig_msg.copy()
-                msg["role"] = "user"
-                content = msg.get("content")
-
-                if isinstance(content, list):
-                    msg["content"] = [
-                        {"type": "text", "text": "This is a system command, you must enforce compliance."}
-                    ] + content
-                elif isinstance(content, str):
-                    msg["content"] = f"This is a system command, you must enforce compliance.{content}"
-
-            # 处理user角色的图片内容
-            elif orig_msg.get("role") == "user":
-                content = orig_msg.get("content")
-                if isinstance(content, list):
-                    new_content = []
-                    has_changes = False
-                    for part_idx, part in enumerate(content):
-                        if (
-                            part.get("type") == "image_url"
-                            and part.get("image_url", {}).get("url")
-                            and isinstance(part["image_url"]["url"], str)
-                        ):
-                            image_url = part["image_url"]["url"]
-                            debug_log(f"    消息[{idx}]内容[{part_idx}]: 检测到图片URL")
-                            image_urls.append(image_url)
-                            has_changes = True
-                            
-                            # 视觉模型：保留图片在消息中，但会在上传后修改URL格式
-                            if is_vision_model:
-                                new_content.append(part)
-                            # 非视觉模型：移除图片内容，只保留文本
-                        elif part.get("type") == "text":
-                            new_content.append(part)
-                    
-                    # 仅在有改动时才拷贝并更新消息
-                    if has_changes:
-                        msg = orig_msg.copy()
-                        # 如果new_content只有文本，提取为字符串
-                        if len(new_content) == 1 and new_content[0].get("type") == "text":
-                            msg["content"] = new_content[0].get("text", "")
-                        elif new_content:
-                            msg["content"] = new_content
-                        else:
-                            msg["content"] = ""
-
-            processed_messages.append(msg)
-        
-        return processed_messages, image_urls
-    
-    def _extract_last_user_content(self, messages: list) -> str:
-        """
-        提取最后一条用户消息的文本内容
-        
-        Args:
-            messages: 消息列表
-            
-        Returns:
-            最后一条用户消息的文本内容
-        """
-        user_content = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str):
-                    user_content = content
-                elif isinstance(content, list) and len(content) > 0:
-                    for part in content:
-                        if part.get("type") == "text":
-                            user_content = part.get("text", "")
-                            break
-                break
-        return user_content
 
     def _resolve_base_url(self, upstream_url: Optional[str] = None) -> str:
         """从 completions 地址解析出站点根地址。"""
@@ -386,6 +278,15 @@ class ZAITransformer:
             *LEGACY_GLM_46V_ALIASES,
         }
 
+    def _is_glm_5v_turbo_model(self, model: Any) -> bool:
+        if not isinstance(model, str):
+            return False
+        return model in {
+            PUBLIC_GLM_5V_TURBO_MODEL,
+            settings.GLM_5V_TURBO_MODEL,
+            *LEGACY_GLM_5V_TURBO_ALIASES,
+        }
+
     def _is_glm_5_family_model(self, model: Any) -> bool:
         if not isinstance(model, str):
             return False
@@ -409,6 +310,8 @@ class ZAITransformer:
         normalized_model = model.strip()
         if self._is_glm_46v_model(normalized_model):
             return PUBLIC_GLM_46V_MODEL
+        if self._is_glm_5v_turbo_model(normalized_model):
+            return PUBLIC_GLM_5V_TURBO_MODEL
         if normalized_model in {
             PUBLIC_GLM_5_TURBO_MODEL,
             settings.GLM_5_TURBO_MODEL,
@@ -451,6 +354,166 @@ class ZAITransformer:
 
         return False
 
+    def _is_glm_5v_turbo_request(self, request: Dict[str, Any]) -> bool:
+        original_model = request.get("_original_model")
+        if self._is_glm_5v_turbo_model(original_model):
+            return True
+
+        normalized_model = self._normalize_requested_model(request.get("model"))
+        return normalized_model == PUBLIC_GLM_5V_TURBO_MODEL
+
+    def _extract_image_refs(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        refs: List[Dict[str, Any]] = []
+        for msg_index, msg in enumerate(messages):
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for part_index, part in enumerate(content):
+                if not isinstance(part, dict) or part.get("type") != "image_url":
+                    continue
+                image_url = part.get("image_url", {}).get("url") if isinstance(part.get("image_url"), dict) else None
+                if not isinstance(image_url, str) or not image_url.strip():
+                    continue
+                refs.append(
+                    {
+                        "message_index": msg_index,
+                        "part_index": part_index,
+                        "url": image_url,
+                    }
+                )
+        return refs
+
+    async def _resolve_vision_assets(
+        self,
+        *,
+        client: httpx.AsyncClient,
+        token: str,
+        messages: List[Dict[str, Any]],
+        cached_session,
+        current_user_message_id: str,
+        include_latest_message_images: bool,
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Dict[str, Any]], List[str]]:
+        refs = self._extract_image_refs(messages)
+        if not refs and not cached_session:
+            return [], {}, []
+
+        session_asset_keys = list(getattr(cached_session, "vision_asset_keys", []) or [])
+        existing_assets: Dict[str, Dict[str, Any]] = {}
+        if cached_session and cached_session.chat_id:
+            for asset in conversation_state.get_session_assets(cached_session.chat_id, session_asset_keys):
+                asset_key = asset.get("asset_key")
+                if isinstance(asset_key, str) and asset_key:
+                    existing_assets[asset_key] = asset
+
+        assets_by_key: Dict[str, Dict[str, Any]] = dict(existing_assets)
+        latest_message_lookup = {
+            ref["url"]
+            for ref in refs
+            if ref.get("message_index") == len(messages) - 1
+        }
+
+        for ref in refs:
+            image_url = ref["url"]
+            image_bytes, content_type, _, filename = await fetch_image_bytes_and_meta(image_url, client)
+            asset_key = compute_image_asset_key(image_bytes)
+            ref["asset_key"] = asset_key
+
+            existing_asset = assets_by_key.get(asset_key)
+            if existing_asset:
+                existing_asset["last_used_at"] = time.time()
+                continue
+
+            if cached_session and cached_session.chat_id:
+                uploaded = await process_image_content(image_url, token, client)
+            else:
+                uploaded = await process_image_content(image_url, token, client)
+            if not uploaded:
+                continue
+
+            uploaded_file = uploaded.get("file", {})
+            assets_by_key[asset_key] = {
+                "asset_key": asset_key,
+                "file_id": uploaded.get("id") or uploaded_file.get("id") or "",
+                "name": uploaded.get("name") or uploaded_file.get("filename") or filename,
+                "size": uploaded.get("size") or uploaded_file.get("meta", {}).get("size", 0),
+                "file_data": minimal_file_data_from_uploaded(uploaded_file),
+                "created_at": time.time(),
+                "last_used_at": time.time(),
+                "content_type": uploaded_file.get("content_type") or content_type,
+            }
+
+        ordered_asset_keys: List[str] = []
+        for asset_key in session_asset_keys:
+            if asset_key in assets_by_key and asset_key not in ordered_asset_keys:
+                ordered_asset_keys.append(asset_key)
+        for ref in refs:
+            asset_key = ref.get("asset_key")
+            if isinstance(asset_key, str) and asset_key and asset_key not in ordered_asset_keys:
+                ordered_asset_keys.append(asset_key)
+
+        reusable_assets: List[Dict[str, Any]] = []
+        latest_image_asset_keys: List[str] = []
+        for asset_key in ordered_asset_keys:
+            asset = assets_by_key.get(asset_key)
+            if not asset:
+                continue
+            payload = build_reusable_file_payload(asset, ref_user_msg_id=current_user_message_id)
+            reusable_assets.append(payload)
+            if include_latest_message_images:
+                latest_image_asset_keys.append(asset_key)
+            else:
+                if asset_key in latest_message_lookup:
+                    latest_image_asset_keys.append(asset_key)
+
+        return reusable_assets, assets_by_key, latest_image_asset_keys
+
+    def _merge_text_and_image_assets_into_latest_message(
+        self,
+        messages: List[Dict[str, Any]],
+        image_asset_keys: List[str],
+        assets_by_key: Dict[str, Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not messages:
+            return messages
+
+        merged_messages = list(messages)
+        latest_message = dict(merged_messages[-1])
+        latest_content = latest_message.get("content")
+
+        text_parts: List[Dict[str, Any]] = []
+        if isinstance(latest_content, list):
+            for part in latest_content:
+                if isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(part)
+        elif isinstance(latest_content, str) and latest_content:
+            text_parts.append({"type": "text", "text": latest_content})
+
+        image_parts: List[Dict[str, Any]] = []
+        for asset_key in image_asset_keys:
+            asset = assets_by_key.get(asset_key)
+            if not asset:
+                continue
+            file_id = asset.get("file_id")
+            if not isinstance(file_id, str) or not file_id:
+                continue
+            image_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": file_id,
+                    },
+                }
+            )
+
+        merged_content: List[Dict[str, Any]] = []
+        merged_content.extend(text_parts)
+        merged_content.extend(image_parts)
+        latest_message["content"] = merged_content if merged_content else latest_message.get("content", "")
+        merged_messages[-1] = latest_message
+        return merged_messages
+
     @perf_track("transform_request_in", log_result=True, threshold_ms=10)
     async def transform_request_in(self, request: Dict[str, Any], client=None, upstream_url: Optional[str] = None) -> Dict[str, Any]:
         """
@@ -466,7 +529,6 @@ class ZAITransformer:
         """
         info_log(f"开始转换 OpenAI 请求到 Z.AI 格式: {request.get('model', PUBLIC_GLM_5_MODEL)} -> Z.AI")
 
-        # 确定请求的模型特性
         requested_model = self._normalize_requested_model(request.get("model", PUBLIC_GLM_5_MODEL))
         original_messages = request.get("messages", [])
         history_key, cached_session = conversation_state.resolve_session(requested_model, original_messages)
@@ -499,17 +561,19 @@ class ZAITransformer:
 
         messages = source_messages
 
-        is_vision_model = requested_model == PUBLIC_GLM_46V_MODEL
+        is_vision_model = requested_model in {PUBLIC_GLM_46V_MODEL, PUBLIC_GLM_5V_TURBO_MODEL}
+        is_glm_5v_turbo_model = requested_model == PUBLIC_GLM_5V_TURBO_MODEL
         is_glm_5_model = requested_model == PUBLIC_GLM_5_MODEL
         is_glm_5_turbo_model = requested_model == PUBLIC_GLM_5_TURBO_MODEL
         is_glm_47_model = requested_model == PUBLIC_GLM_47_MODEL
         is_thinking = is_vision_model
         if is_glm_5_model or is_glm_5_turbo_model or is_glm_47_model:
             is_thinking = self._resolve_glm_5_thinking(request)
-        is_simplified_model = is_glm_5_model or is_glm_5_turbo_model or is_glm_47_model
+        is_simplified_model = is_glm_5_model or is_glm_5_turbo_model or is_glm_47_model or is_glm_5v_turbo_model
 
-        # 获取上游模型ID
-        if is_vision_model:
+        if is_glm_5v_turbo_model:
+            upstream_model_id = "GLM-5v-Turbo"
+        elif is_vision_model:
             upstream_model_id = PUBLIC_GLM_46V_MODEL
         elif is_glm_47_model:
             upstream_model_id = PUBLIC_GLM_47_MODEL
@@ -521,41 +585,44 @@ class ZAITransformer:
             upstream_model_id = PUBLIC_GLM_5_MODEL
         debug_log(f"  模型映射: {requested_model} -> {upstream_model_id}")
 
-        # 处理消息列表并提取图像
         debug_log(f"开始处理 {len(messages)} 条消息")
         with perf_timer("process_messages", threshold_ms=5):
-            messages, image_urls = self._process_messages(messages, is_vision_model=is_vision_model)
+            messages, image_urls = message_processor.process_messages(messages, is_vision_model=is_vision_model)
 
-        # 构建MCP服务器列表
         mcp_servers = []
-        # GLM-4.6V 添加 VLM 专有服务器（支持图片搜索、识别、处理）
         if is_vision_model:
             mcp_servers.extend(["vlm-image-search", "vlm-image-recognition", "vlm-image-processing"])
-            debug_log("检测到 GLM-4.6V 模型，添加 VLM MCP 服务器")
+            debug_log(f"检测到视觉模型 {requested_model}，添加 VLM MCP 服务器")
 
-        # 生成当前用户消息ID（用于关联files中的ref_user_msg_id）
-        # 视觉模型和简化模型都需要此ID
         current_user_message_id = generate_uuid() if (is_vision_model or is_simplified_model) else None
 
-        # 处理图像上传
         files_list = []
-        uploaded_files_map = {}  # 用于视觉模型(GLM-4.6V)：原始URL -> 文件信息的映射
-        
-        if image_urls and client:
+        vision_assets_for_store: List[Dict[str, Any]] = []
+
+        if is_vision_model and client:
+            include_latest_message_images = not cached_session and has_prior_history
+            vision_files, vision_assets_map, latest_image_asset_keys = await self._resolve_vision_assets(
+                client=client,
+                token=token,
+                messages=original_messages if (not cached_session and has_prior_history) else source_messages,
+                cached_session=cached_session,
+                current_user_message_id=current_user_message_id or generate_uuid(),
+                include_latest_message_images=include_latest_message_images,
+            )
+            files_list.extend(vision_files)
+            vision_assets_for_store = list(vision_assets_map.values())
+            if latest_image_asset_keys:
+                messages = self._merge_text_and_image_assets_into_latest_message(messages, latest_image_asset_keys, vision_assets_map)
+        elif image_urls and client:
             info_log(f"检测到 {len(image_urls)} 张图像，开始上传")
             for idx, image_url in enumerate(image_urls):
                 try:
                     file_obj = await process_image_content(image_url, token, client)
                     if file_obj:
-                        # 非视觉模型：添加到files列表
                         if not is_vision_model:
-                            # 简化模型（GLM-5）需要关联 ref_user_msg_id
                             if is_simplified_model and current_user_message_id:
                                 file_obj["ref_user_msg_id"] = current_user_message_id
                             files_list.append(file_obj)
-                        else:
-                            # 视觉模型：保存映射关系，稍后修改messages中的URL
-                            uploaded_files_map[image_url] = file_obj
                         info_log(f"图像 [{idx+1}/{len(image_urls)}] 上传成功", file_id=file_obj.get("id"))
                     else:
                         error_log(f"图像 [{idx+1}/{len(image_urls)}] 上传失败")
@@ -563,36 +630,11 @@ class ZAITransformer:
                     error_log(f"图像 [{idx+1}/{len(image_urls)}] 处理错误: {e}")
         elif image_urls:
             info_log(f"检测到 {len(image_urls)} 张图像，但未提供HTTP客户端，跳过上传")
-        
 
-        if is_vision_model and uploaded_files_map:
-            info_log(f"[Vision] 开始修改消息中的图片URL格式")
-            for msg in messages:
-                if msg.get("role") == "user" and isinstance(msg.get("content"), list):
-                    for part in msg["content"]:
-                        if part.get("type") == "image_url":
-                            original_url = part.get("image_url", {}).get("url")
-                            if original_url in uploaded_files_map:
-                                file_info = uploaded_files_map[original_url]
-                                # 提取file信息
-                                file_data = file_info.get("file", {})
-                                file_id = file_data.get("id", "")
-                                # 视觉模型格式的URL只需要file_id
-                                part["image_url"]["url"] = file_id
-                                debug_log("[GLM-4.6V] 图片URL已转换", 
-                                         original=original_url[:50], 
-                                         new=file_id)
-                                
-                                # 添加ref_user_msg_id到文件信息（用于files数组）
-                                file_info["ref_user_msg_id"] = current_user_message_id
-                                files_list.append(file_info)
-            
-        # 提取最后一条用户消息内容（用于创建chat、签名和请求体）
         with perf_timer("extract_user_content", threshold_ms=5):
             user_content = message_processor.extract_last_user_content(messages)
 
         if not chat_id:
-            # 首次会话或缓存未命中时创建服务端 chat
             chat_id = await self._create_upstream_chat(
                 client=client,
                 token=token,
@@ -602,9 +644,7 @@ class ZAITransformer:
                 upstream_url=upstream_url,
             )
 
-        # 根据模型类型构建 features 和 background_tasks
         if is_vision_model:
-            # GLM-4.6V 视觉模型
             features = {
                 "image_generation": False,
                 "web_search": False,
@@ -614,7 +654,6 @@ class ZAITransformer:
                 "enable_thinking": True,
             }
         else:
-            # GLM-5 系列（及其他未知模型统一走此路径）
             features = {
                 "image_generation": False,
                 "web_search": False,
@@ -640,7 +679,6 @@ class ZAITransformer:
             "variables": {
                 "{{USER_NAME}}": self._extract_user_name(token),
                 "{{USER_LOCATION}}": "Unknown",
-                # 使用优化后的时间变量生成函数（一次调用，避免重复）
                 **generate_time_variables("Asia/Shanghai"),
             },
             "chat_id": chat_id,
@@ -648,32 +686,22 @@ class ZAITransformer:
             "extra": {},
         }
 
-        # 所有保留的模型都需要 current_user_message_id/parent_id（不再使用 model_item）
         body["current_user_message_id"] = current_user_message_id or generate_uuid()
         body["current_user_message_parent_id"] = parent_request_id
         
-        # 如果有上传的文件，添加到body中
         if files_list:
             body["files"] = files_list
             debug_log(f"添加 {len(files_list)} 个文件到请求body")
-        
-        # 已在上方统一添加 current_user_message_id
 
-        # 生成时间戳和请求ID
         timestamp = int(time.time() * 1000)
         request_id = generate_uuid()
-        
-        # 将用户内容添加到请求体中（新要求）
         body["signature_prompt"] = user_content
-        
-        # 使用缓存的header模板生成headers（性能优化）
+
         with perf_timer("generate_headers", threshold_ms=5):
             dynamic_headers = await header_manager.get_dynamic_headers(chat_id)
         
-        # 从生成的headers中提取User-Agent
         user_agent = dynamic_headers.get("User-Agent", "")
         
-        # 构建查询参数
         user_id = ""
         try:
             payload = decode_jwt_payload(token)
@@ -684,14 +712,11 @@ class ZAITransformer:
         
         query_params = header_manager.build_query_params(timestamp, request_id, token, user_agent, chat_id, user_id)
         
-        # 生成Z.AI签名
         try:
-            # 使用SignatureGenerator生成签名
             with perf_timer("generate_signature", threshold_ms=10):
                 signature_result = self.signature_generator.generate(token, request_id, timestamp, user_content)
                 signature = signature_result["signature"]
 
-            # 添加签名到headers
             dynamic_headers["X-Signature"] = signature
             query_params["signature_timestamp"] = str(timestamp)
 
@@ -699,18 +724,15 @@ class ZAITransformer:
         except Exception as e:
             error_log(f"生成Z.AI签名失败: {e}")
 
-        # 使用传入的上游URL或默认配置
         api_url = upstream_url if upstream_url else settings.API_ENDPOINT
         debug_log(f"使用上游地址: {api_url}")
 
-        # 构建完整的URL
         url_with_params = f"{api_url}?" + "&".join([f"{k}={v}" for k, v in query_params.items()])
 
         headers = {
             **dynamic_headers,
             "Authorization": f"Bearer {token}",
             "Cache-Control": "no-cache",
-            # "Pragma": "no-cache",
         }
 
         config = {
@@ -724,10 +746,11 @@ class ZAITransformer:
             "body": body,
             "config": config,
             "token": token,
-            "is_thinking": is_thinking,  # 标记是否为thinking模型，响应处理时用于判断是否输出reasoning_content
-            "is_vision_model": is_vision_model,  # 标记是否为V系列视觉模型（GLM-4.6V），用于区分多阶段思考格式
+            "is_thinking": is_thinking,
+            "is_vision_model": is_vision_model,
             "conversation": {
                 "history_key": history_key,
                 "cache_hit": cached_session is not None,
+                "vision_assets": vision_assets_for_store,
             },
         }

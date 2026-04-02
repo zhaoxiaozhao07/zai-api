@@ -48,6 +48,7 @@ router = APIRouter()
 logger = get_logger("openai_api")
 
 PUBLIC_GLM_46V_MODEL = "glm-4.6v"
+PUBLIC_GLM_5V_TURBO_MODEL = "glm-5v-turbo"
 PUBLIC_GLM_5_MODEL = "glm-5"
 PUBLIC_GLM_5_TURBO_MODEL = "glm-5-turbo"
 PUBLIC_GLM_47_MODEL = "glm-4.7"
@@ -62,6 +63,7 @@ async def list_models():
     response = ModelsResponse(
         data=[
             Model(id=PUBLIC_GLM_46V_MODEL, created=current_time, owned_by="z.ai"),
+            Model(id=PUBLIC_GLM_5V_TURBO_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=PUBLIC_GLM_5_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=PUBLIC_GLM_5_TURBO_MODEL, created=current_time, owned_by="z.ai"),
             Model(id=PUBLIC_GLM_47_MODEL, created=current_time, owned_by="z.ai"),

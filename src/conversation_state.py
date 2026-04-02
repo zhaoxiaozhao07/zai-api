@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,9 +15,21 @@ from .helpers import error_log
 
 
 MAX_CACHE_ENTRIES = 4096
+MAX_SESSION_ASSETS = 24
+MAX_TOTAL_SESSION_ASSETS = 4096
 BOOTSTRAP_HISTORY_MAX_CHARS = 12000
 DEFAULT_RETENTION_DAYS = 7
 STATE_FILE_PATH = Path(__file__).resolve().parent.parent / "data" / "conversation_state.json"
+
+
+@dataclass
+class SessionImageAsset:
+    asset_key: str
+    file_id: str
+    name: str = "image"
+    size: int = 0
+    created_at: float = field(default_factory=time.time)
+    last_used_at: float = field(default_factory=time.time)
 
 
 @dataclass
@@ -27,6 +39,7 @@ class ConversationSession:
     last_request_id: str
     model: str
     updated_at: float = field(default_factory=time.time)
+    vision_asset_keys: List[str] = field(default_factory=list)
 
 
 class ConversationState:
@@ -34,6 +47,7 @@ class ConversationState:
         self._lock = Lock()
         self._history_to_session: Dict[str, ConversationSession] = {}
         self._chat_to_keys: Dict[str, set[str]] = {}
+        self._session_assets: Dict[str, Dict[str, SessionImageAsset]] = {}
         self._state_file_path = STATE_FILE_PATH
         self._load_from_disk()
 
@@ -61,6 +75,7 @@ class ConversationState:
         chat_id: str,
         token: str,
         last_request_id: str,
+        vision_assets: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[str]:
         normalized_messages = self._sanitize_messages(request_messages)
         if not normalized_messages:
@@ -75,6 +90,10 @@ class ConversationState:
             model=model,
         )
 
+        normalized_assets = self._normalize_vision_assets(vision_assets)
+        if normalized_assets:
+            session.vision_asset_keys = [asset.asset_key for asset in normalized_assets]
+
         with self._lock:
             self._cleanup_locked()
             previous = self._history_to_session.get(history_key)
@@ -87,6 +106,8 @@ class ConversationState:
 
             self._history_to_session[history_key] = session
             self._chat_to_keys.setdefault(chat_id, set()).add(history_key)
+            if normalized_assets:
+                self._session_assets[chat_id] = {asset.asset_key: asset for asset in normalized_assets}
             self._trim_locked()
             self._persist_locked()
 
@@ -101,6 +122,8 @@ class ConversationState:
             changed = bool(keys)
             for key in keys:
                 self._history_to_session.pop(key, None)
+            if self._session_assets.pop(chat_id, None):
+                changed = True
             if self._cleanup_locked() or changed:
                 self._persist_locked()
 
@@ -124,6 +147,30 @@ class ConversationState:
             f"【历史对话】\n{history_text}\n\n"
             f"【用户最新消息】\n{latest_text}"
         )
+
+    def get_session_assets(self, chat_id: Optional[str], asset_keys: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        if not chat_id:
+            return []
+
+        with self._lock:
+            assets_map = self._session_assets.get(chat_id, {})
+            if not assets_map:
+                return []
+
+            keys = asset_keys or list(assets_map.keys())
+            now = time.time()
+            result: List[Dict[str, Any]] = []
+            changed = False
+            for asset_key in keys:
+                asset = assets_map.get(asset_key)
+                if not asset:
+                    continue
+                asset.last_used_at = now
+                changed = True
+                result.append(asdict(asset))
+            if changed:
+                self._persist_locked()
+            return result
 
     def _history_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         normalized_messages = self._sanitize_messages(messages)
@@ -258,6 +305,7 @@ class ConversationState:
         if not expired_keys:
             return False
 
+        expired_chat_ids = set()
         for key in expired_keys:
             session = self._history_to_session.pop(key, None)
             if not session:
@@ -267,26 +315,80 @@ class ConversationState:
                 keys.discard(key)
                 if not keys:
                     self._chat_to_keys.pop(session.chat_id, None)
+                    expired_chat_ids.add(session.chat_id)
+        for chat_id in expired_chat_ids:
+            self._session_assets.pop(chat_id, None)
         return True
 
     def _trim_locked(self) -> bool:
+        changed = False
         overflow = len(self._history_to_session) - MAX_CACHE_ENTRIES
-        if overflow <= 0:
-            return False
+        if overflow > 0:
+            oldest_items = sorted(
+                self._history_to_session.items(),
+                key=lambda item: item[1].updated_at,
+            )[:overflow]
 
-        oldest_items = sorted(
-            self._history_to_session.items(),
-            key=lambda item: item[1].updated_at,
-        )[:overflow]
+            for key, session in oldest_items:
+                self._history_to_session.pop(key, None)
+                keys = self._chat_to_keys.get(session.chat_id)
+                if keys:
+                    keys.discard(key)
+                    if not keys:
+                        self._chat_to_keys.pop(session.chat_id, None)
+                        self._session_assets.pop(session.chat_id, None)
+                changed = True
 
-        for key, session in oldest_items:
-            self._history_to_session.pop(key, None)
-            keys = self._chat_to_keys.get(session.chat_id)
-            if keys:
-                keys.discard(key)
-                if not keys:
-                    self._chat_to_keys.pop(session.chat_id, None)
-        return True
+        total_assets = sum(len(items) for items in self._session_assets.values())
+        if total_assets > MAX_TOTAL_SESSION_ASSETS:
+            removable: List[Tuple[str, str, float]] = []
+            for chat_id, assets in self._session_assets.items():
+                for asset_key, asset in assets.items():
+                    removable.append((chat_id, asset_key, asset.last_used_at))
+            removable.sort(key=lambda item: item[2])
+            for chat_id, asset_key, _ in removable[: total_assets - MAX_TOTAL_SESSION_ASSETS]:
+                assets = self._session_assets.get(chat_id)
+                if not assets or asset_key not in assets:
+                    continue
+                assets.pop(asset_key, None)
+                self._drop_asset_from_sessions_locked(chat_id, asset_key)
+                changed = True
+        return changed
+
+    def _drop_asset_from_sessions_locked(self, chat_id: str, asset_key: str) -> None:
+        for session in self._history_to_session.values():
+            if session.chat_id != chat_id:
+                continue
+            if asset_key in session.vision_asset_keys:
+                session.vision_asset_keys = [key for key in session.vision_asset_keys if key != asset_key]
+
+    def _normalize_vision_assets(self, vision_assets: Optional[List[Dict[str, Any]]]) -> List[SessionImageAsset]:
+        if not vision_assets:
+            return []
+
+        normalized: Dict[str, SessionImageAsset] = {}
+        now = time.time()
+        for item in vision_assets:
+            if not isinstance(item, dict):
+                continue
+            asset_key = item.get("asset_key")
+            file_id = item.get("file_id")
+            if not isinstance(asset_key, str) or not asset_key.strip() or not isinstance(file_id, str) or not file_id.strip():
+                continue
+            normalized[asset_key] = SessionImageAsset(
+                asset_key=asset_key.strip(),
+                file_id=file_id.strip(),
+                name=str(item.get("name") or "image"),
+                size=int(item.get("size") or 0),
+                created_at=float(item.get("created_at") or now),
+                last_used_at=float(item.get("last_used_at") or now),
+            )
+
+        assets = list(normalized.values())
+        assets.sort(key=lambda asset: asset.created_at)
+        if len(assets) > MAX_SESSION_ASSETS:
+            assets = assets[-MAX_SESSION_ASSETS:]
+        return assets
 
     def _load_from_disk(self) -> None:
         with self._lock:
@@ -301,11 +403,14 @@ class ConversationState:
                 error_log("[CONVERSATION] 加载持久化状态失败", error=str(exc))
                 self._history_to_session = {}
                 self._chat_to_keys = {}
+                self._session_assets = {}
                 return
 
             stored_sessions = payload.get("history_to_session", {}) if isinstance(payload, dict) else {}
+            stored_session_assets = payload.get("session_assets", {}) if isinstance(payload, dict) else {}
             self._history_to_session = {}
             self._chat_to_keys = {}
+            self._session_assets = {}
 
             for history_key, raw_session in stored_sessions.items():
                 if not isinstance(history_key, str) or not isinstance(raw_session, dict):
@@ -316,29 +421,34 @@ class ConversationState:
                 last_request_id = raw_session.get("last_request_id")
                 model = raw_session.get("model")
                 updated_at = raw_session.get("updated_at", time.time())
+                raw_asset_keys = raw_session.get("vision_asset_keys", [])
 
                 if not all(isinstance(value, str) and value.strip() for value in [chat_id, token, last_request_id, model]):
                     continue
-
-                chat_id_str = str(chat_id)
-                token_str = str(token)
-                last_request_id_str = str(last_request_id)
-                model_str = str(model)
 
                 try:
                     updated_at_value = float(updated_at)
                 except (TypeError, ValueError):
                     continue
 
+                asset_keys = [key for key in raw_asset_keys if isinstance(key, str) and key.strip()]
                 session = ConversationSession(
-                    chat_id=chat_id_str,
-                    token=token_str,
-                    last_request_id=last_request_id_str,
-                    model=model_str,
+                    chat_id=str(chat_id),
+                    token=str(token),
+                    last_request_id=str(last_request_id),
+                    model=str(model),
                     updated_at=updated_at_value,
+                    vision_asset_keys=asset_keys[-MAX_SESSION_ASSETS:],
                 )
                 self._history_to_session[history_key] = session
-                self._chat_to_keys.setdefault(chat_id_str, set()).add(history_key)
+                self._chat_to_keys.setdefault(session.chat_id, set()).add(history_key)
+
+            for chat_id, raw_assets in stored_session_assets.items():
+                if not isinstance(chat_id, str) or not isinstance(raw_assets, dict):
+                    continue
+                normalized_assets = self._normalize_vision_assets(list(raw_assets.values()))
+                if normalized_assets:
+                    self._session_assets[chat_id] = {asset.asset_key: asset for asset in normalized_assets}
 
             if self._cleanup_locked() or self._trim_locked():
                 self._persist_locked()
@@ -354,9 +464,25 @@ class ConversationState:
                         "last_request_id": session.last_request_id,
                         "model": session.model,
                         "updated_at": session.updated_at,
+                        "vision_asset_keys": session.vision_asset_keys,
                     }
                     for history_key, session in self._history_to_session.items()
-                }
+                },
+                "session_assets": {
+                    chat_id: {
+                        asset_key: {
+                            "asset_key": asset.asset_key,
+                            "file_id": asset.file_id,
+                            "name": asset.name,
+                            "size": asset.size,
+                            "created_at": asset.created_at,
+                            "last_used_at": asset.last_used_at,
+                        }
+                        for asset_key, asset in assets.items()
+                    }
+                    for chat_id, assets in self._session_assets.items()
+                    if assets
+                },
             }
 
             temp_path = self._state_file_path.with_suffix(".json.tmp")
