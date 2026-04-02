@@ -601,18 +601,37 @@ class ZAITransformer:
 
         if is_vision_model and client:
             include_latest_message_images = not cached_session and has_prior_history
+            vision_source_messages = original_messages if (not cached_session and has_prior_history) else source_messages
+            replace_all_user_message_images = not cached_session and has_prior_history
             vision_files, vision_assets_map, latest_image_asset_keys = await self._resolve_vision_assets(
                 client=client,
                 token=token,
-                messages=original_messages if (not cached_session and has_prior_history) else source_messages,
+                messages=vision_source_messages,
                 cached_session=cached_session,
                 current_user_message_id=current_user_message_id or generate_uuid(),
                 include_latest_message_images=include_latest_message_images,
             )
             files_list.extend(vision_files)
             vision_assets_for_store = list(vision_assets_map.values())
-            if latest_image_asset_keys:
-                messages = self._merge_text_and_image_assets_into_latest_message(messages, latest_image_asset_keys, vision_assets_map)
+
+            replace_asset_keys = latest_image_asset_keys
+            if not replace_asset_keys and len(original_messages) == 1 and len(vision_files) == 1:
+                single_file_id = vision_files[0].get("id")
+                if isinstance(single_file_id, str) and single_file_id.strip():
+                    fallback_asset_key = next(iter(vision_assets_map.keys()), None)
+                    if isinstance(fallback_asset_key, str) and fallback_asset_key:
+                        replace_asset_keys = [fallback_asset_key]
+
+            stripped_messages = message_processor.replace_image_urls_with_file_ids(
+                messages,
+                replace_asset_keys,
+                vision_assets_map,
+                latest_message_only=not replace_all_user_message_images,
+            )
+            if stripped_messages is not None:
+                messages = stripped_messages
+            elif replace_asset_keys:
+                messages = self._merge_text_and_image_assets_into_latest_message(messages, replace_asset_keys, vision_assets_map)
         elif image_urls and client:
             info_log(f"检测到 {len(image_urls)} 张图像，开始上传")
             for idx, image_url in enumerate(image_urls):
@@ -645,6 +664,11 @@ class ZAITransformer:
             )
 
         if is_vision_model:
+            vision_mode_flags = {
+                "vlm_tools_enable": True,
+                "vlm_web_search_enable": False,
+                "vlm_website_mode": True,
+            }
             features = {
                 "image_generation": False,
                 "web_search": False,
@@ -652,8 +676,10 @@ class ZAITransformer:
                 "preview_mode": True,
                 "flags": [],
                 "enable_thinking": True,
+                **vision_mode_flags,
             }
         else:
+            vision_mode_flags = {}
             features = {
                 "image_generation": False,
                 "web_search": False,
@@ -683,7 +709,7 @@ class ZAITransformer:
             },
             "chat_id": chat_id,
             "id": generate_uuid(),
-            "extra": {},
+            "extra": dict(vision_mode_flags),
         }
 
         body["current_user_message_id"] = current_user_message_id or generate_uuid()

@@ -20,28 +20,26 @@ from .helpers import (
     request_stage_log,
 )
 from .services.openai_service import chat_completion_service
-
-# 尝试导入orjson（性能优化），如果不可用则fallback到标准json
+# 尝试使用 orjson 进行 JSON 序列化和反序列化，如果不可用则回退到标准 json 模块
 try:
     import orjson
-    
-    # 创建orjson兼容层
+
     class JSONEncoder:
         @staticmethod
         def dumps(obj, **kwargs):
-            # orjson.dumps返回bytes，需要decode
+            # orjson.dumps
             return orjson.dumps(obj).decode('utf-8')
         
         @staticmethod
         def loads(s, **kwargs):
-            # orjson.loads可以接受str或bytes
+            # orjson.loads
             return orjson.loads(s)
     
     json_lib = JSONEncoder()
-    info_log("[OK] 使用 orjson 进行 JSON 序列化/反序列化（性能优化）")
+    info_log("[OK] 使用 orjson 进行 JSON 序列化和反序列化（性能优化）")
 except ImportError:
     json_lib = json
-    info_log("[WARN] orjson 未安装，使用标准 json 库")
+    info_log("[WARN] orjson 未安装，使用标准 json 模块")
 
 router = APIRouter()
 
@@ -74,11 +72,10 @@ async def list_models():
 
 @router.post("/v1/chat/completions")
 async def chat_completions(request: OpenAIRequest, authorization: str = Header(...)):
-    """处理 chat completion 请求，支持流式和非流式"""
     role = request.messages[0].role if request.messages else "unknown"
     request_stage_log(
         "received",
-        "收到客户端请求",
+        "接收到新的聊天完成请求",
         model=request.model,
         stream=request.stream,
         entry_role=role,
@@ -86,9 +83,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         tools_count=len(request.tools) if request.tools else 0,
     )
     
-    # 输出客户端请求体
     request_body = request.model_dump()
-    debug_log("客户端请求体详情", request_body=json_lib.dumps(request_body))
     
     try:
         # Validate API key
@@ -99,17 +94,15 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             api_key = authorization[7:]
             if api_key != settings.AUTH_TOKEN:
                 raise HTTPException(status_code=401, detail="Invalid API key")
-        
-        # 获取请求上下文（HTTP 客户端 / 代理 / 上游）
+    
         request_client, current_proxy, current_upstream = await service.get_request_context()
         request_stage_log(
             "route_selected",
-            "已获取请求路由配置",
+            "路由选择完成",
             upstream=current_upstream,
             proxy=current_proxy or "direct",
         )
 
-        # 准备请求并转换
         request_dict, request_dict_for_transform = await service.prepare_request(request)
         chat_id = request_dict_for_transform.get("chat_id")
         bind_request_context(
@@ -120,7 +113,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         )
         request_stage_log(
             "context_ready",
-            "请求上下文已建立",
+            "请求上下文已准备就绪",
             request_id=chat_id,
             upstream=current_upstream,
             proxy=current_proxy or "direct",
@@ -138,7 +131,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
             upstream=current_upstream,
         )
 
-        # 根据 stream 参数决定返回流式或非流式响应
+        # 根据 stream 参数决定返回流式响应还是非流式响应
         if not request.stream:
             request_stage_log(
                 "non_stream_mode",
@@ -156,7 +149,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     request_dict_for_transform,
                     json_lib,
                 )
-                request_stage_log("non_stream_ready", "非流式结果已生成")
+                request_stage_log("non_stream_ready", "非流式响应已生成", upstream=current_upstream, proxy=current_proxy or "direct")
                 return result
             finally:
                 reset_request_context("request_id", "upstream", "proxy", "model")
@@ -169,7 +162,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                 proxy=current_proxy or "direct",
             )
             try:
-                request_stage_log("stream_dispatch", "开始推送流式响应数据")
+                request_stage_log("stream_dispatch", "开始分发流式响应数据", upstream=current_upstream, proxy=current_proxy or "direct")
                 async for chunk in service.stream_response(
                     request,
                     transformed,
@@ -180,9 +173,9 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                     json_lib,
                 ):
                                                     yield chunk
-                request_stage_log("stream_finished", "流式响应生成器完成")
+                request_stage_log("stream_finished", "流式响应生成完成", upstream=current_upstream, proxy=current_proxy or "direct")
             finally:
-                request_stage_log("stream_cleanup", "流式上下文清理")
+                request_stage_log("stream_cleanup", "流式上下文清理", upstream=current_upstream, proxy=current_proxy or "direct")
                 reset_request_context("request_id", "upstream", "proxy", "model")
 
         streaming_response = StreamingResponse(
@@ -193,7 +186,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
                 "Connection": "keep-alive",
             },
         )
-        request_stage_log("stream_ready", "流式响应已交给 FastAPI", media_type="text/event-stream")
+        request_stage_log("stream_ready", "流式响应准备就绪", upstream=current_upstream, proxy=current_proxy or "direct")
         return streaming_response
 
     except HTTPException:
@@ -202,7 +195,7 @@ async def chat_completions(request: OpenAIRequest, authorization: str = Header(.
         raise
     except Exception as e:
         reset_request_context("request_id", "upstream", "proxy", "model")
-        error_log("处理请求时发生错误", error=str(e))
+        error_log("处理请求时发生异常", error=str(e))
         error_log("[REQUEST] 处理异常")
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
@@ -231,8 +224,9 @@ def create_openai_response(chat_id: str, model: str, content: str, reasoning_con
         }
     }
     
-    # 如果有推理内容，添加到message中
+    # 如果 reasoning_content 不为空，则将其添加到响应中
     if reasoning_content:
         response["choices"][0]["message"]["reasoning_content"] = reasoning_content
     
     return response
+

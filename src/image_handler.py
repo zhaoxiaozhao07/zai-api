@@ -257,14 +257,17 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
     Returns:
         格式化后的文件对象
     """
+    meta = file_data.get("meta") if isinstance(file_data.get("meta"), dict) else {}
+    raw_name = file_data.get("filename") or meta.get("name") or "image"
+    encoded_name = httpx.URL("https://dummy.invalid/").copy_with(path=f"/{raw_name}").path.lstrip("/")
     return {
         "type": "image",
         "file": file_data,
         "id": file_data["id"],
         "url": f"/api/v1/files/{file_data['id']}",
-        "name": file_data.get("filename", "image"),
+        "name": encoded_name,
         "status": "uploaded",
-        "size": file_data.get("meta", {}).get("size", 0),
+        "size": meta.get("size", 0),
         "error": "",
         "itemId": str(uuid.uuid4()),
         "media": "image"
@@ -274,13 +277,24 @@ def format_file_for_zai_request(file_data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def minimal_file_data_from_uploaded(file_data: Dict[str, Any]) -> Dict[str, Any]:
-    """裁剪上传返回的 file_data，仅保留后续复用所需最小字段。"""
+    """保留上传返回中的兼容关键字段，避免会话复用时丢失网页端依赖元数据。"""
     minimal: Dict[str, Any] = {}
     for key in MINIMAL_FILE_META_KEYS:
         if key in file_data:
             minimal[key] = file_data[key]
-    if "meta" not in minimal or not isinstance(minimal.get("meta"), dict):
-        minimal["meta"] = {"size": 0}
+
+    for passthrough_key in ("user_id", "hash", "data", "created_at", "updated_at"):
+        if passthrough_key in file_data:
+            minimal[passthrough_key] = file_data[passthrough_key]
+
+    meta = minimal.get("meta") if isinstance(minimal.get("meta"), dict) else {}
+    original_meta = file_data.get("meta") if isinstance(file_data.get("meta"), dict) else {}
+    for meta_key in ("name", "content_type", "size", "cdn_url", "data", "oss_endpoint"):
+        if meta_key in original_meta:
+            meta[meta_key] = original_meta[meta_key]
+    if "size" not in meta:
+        meta["size"] = 0
+    minimal["meta"] = meta
     return minimal
 
 

@@ -105,6 +105,70 @@ class MessageProcessor:
         
         return processed_messages, image_urls
     
+    def replace_image_urls_with_file_ids(
+        self,
+        messages: List[Dict],
+        image_asset_keys: List[str],
+        assets_by_key: Dict[str, Dict[str, Any]],
+        latest_message_only: bool = True,
+    ) -> List[Dict]:
+        """将用户消息中的图片 base64/URL 替换为已上传文件 file_id，避免把大图数据继续带入 completions body。"""
+        if not messages or not image_asset_keys:
+            return messages
+
+        replaced_messages = [msg.copy() if isinstance(msg, dict) else msg for msg in messages]
+
+        target_message_indexes = [len(replaced_messages) - 1] if latest_message_only else list(range(len(replaced_messages)))
+        image_file_ids: List[str] = []
+        for asset_key in image_asset_keys:
+            asset = assets_by_key.get(asset_key)
+            file_id = asset.get("file_id") if isinstance(asset, dict) else None
+            if isinstance(file_id, str) and file_id.strip():
+                image_file_ids.append(file_id.strip())
+
+        if not image_file_ids:
+            return messages
+
+        image_index = 0
+        for message_index in target_message_indexes:
+            latest_message = replaced_messages[message_index]
+            if not isinstance(latest_message, dict) or latest_message.get("role") != "user":
+                continue
+
+            content = latest_message.get("content")
+            if not isinstance(content, list):
+                continue
+
+            rebuilt_content: List[Dict[str, Any]] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    rebuilt_content.append(part)
+                    continue
+
+                if part.get("type") == "image_url":
+                    if image_index >= len(image_file_ids):
+                        continue
+                    rebuilt_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_file_ids[image_index],
+                            },
+                        }
+                    )
+                    image_index += 1
+                    continue
+
+                rebuilt_content.append(part)
+
+            latest_message["content"] = rebuilt_content
+            replaced_messages[message_index] = latest_message
+
+            if image_index >= len(image_file_ids):
+                break
+
+        return replaced_messages
+
     def extract_last_user_content(self, messages: list) -> str:
         """
         提取最后一条用户消息的文本内容

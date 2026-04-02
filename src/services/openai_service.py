@@ -156,6 +156,62 @@ class ChatCompletionService:
         if chat_id:
             conversation_state.invalidate_chat(chat_id)
 
+    def _log_upstream_request_summary(self, transformed: dict) -> None:
+        body = transformed.get("body", {}) if isinstance(transformed, dict) else {}
+        messages = body.get("messages") if isinstance(body.get("messages"), list) else []
+        files = body.get("files") if isinstance(body.get("files"), list) else []
+
+        image_url_prefixes = []
+        inline_data_url_count = 0
+        message_image_count = 0
+        total_text_chars = 0
+        max_text_part_chars = 0
+
+        for message in messages:
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, str):
+                total_text_chars += len(content)
+                max_text_part_chars = max(max_text_part_chars, len(content))
+                continue
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    text = part.get("text")
+                    if isinstance(text, str):
+                        text_len = len(text)
+                        total_text_chars += text_len
+                        max_text_part_chars = max(max_text_part_chars, text_len)
+                    continue
+                if part.get("type") == "image_url":
+                    image_url = part.get("image_url", {}).get("url") if isinstance(part.get("image_url"), dict) else None
+                    if isinstance(image_url, str):
+                        message_image_count += 1
+                        if image_url.startswith("data:"):
+                            inline_data_url_count += 1
+                            image_url_prefixes.append(image_url[:32])
+                        else:
+                            image_url_prefixes.append(image_url[:64])
+
+        try:
+            body_size_bytes = len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        except Exception:
+            body_size_bytes = -1
+
+        debug_log(
+            "上游请求体摘要",
+            body_size_bytes=body_size_bytes,
+            message_count=len(messages),
+            files_count=len(files),
+            message_image_count=message_image_count,
+            inline_data_url_count=inline_data_url_count,
+            total_text_chars=total_text_chars,
+            max_text_part_chars=max_text_part_chars,
+            image_url_prefixes=image_url_prefixes[:8],
+        )
+
     async def handle_non_stream_request(
         self,
         request: OpenAIRequest,
@@ -203,6 +259,7 @@ class ChatCompletionService:
                     upstream=current_upstream,
                     proxy=current_proxy or "direct",
                 )
+                self._log_upstream_request_summary(transformed)
                 request_start_time = time.perf_counter()
                 async with client.stream(
                     "POST",
@@ -476,6 +533,7 @@ class ChatCompletionService:
                     upstream=current_upstream,
                     proxy=current_proxy or "direct",
                 )
+                self._log_upstream_request_summary(transformed)
                 request_start_time = time.perf_counter()
                 async with client.stream(
                     "POST",
@@ -671,12 +729,7 @@ class ChatCompletionService:
                                         )
                                         if new_reasoning:
                                             _log_v_output("reasoning_content_fallback", new_reasoning)
-                                            yield self.chunk.build_reasoning_chunk(
-                                                json_lib,
-                                                transformed,
-                                                request,
-                                                new_reasoning,
-                                            )
+                                            yield self.chunk.build_reasoning_chunk(json_lib, transformed, request, new_reasoning)
                             continue
 
                         if phase == "answer":
