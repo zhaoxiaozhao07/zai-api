@@ -6,6 +6,7 @@ from .config import settings, MODEL_MAPPING
 from .helpers import debug_log, get_logger, configure_structlog
 from .schemas import OpenAIRequest, ModelsResponse, Model, Message, ContentPart
 from .signature import SignatureGenerator, decode_jwt_payload, extract_user_id_from_token
+from .model_fetcher import fetch_models
 from .token_pool import TokenPool, get_token_pool
 from .zai_transformer import ZAITransformer
 
@@ -26,5 +27,6 @@ __all__ = [
     "TokenPool",
     "get_token_pool",
     "ZAITransformer",
+    "fetch_models",
 ]
 
